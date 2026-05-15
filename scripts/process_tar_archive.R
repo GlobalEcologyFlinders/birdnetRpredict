@@ -164,6 +164,7 @@ collapse_species <- function(summary_table, limit = 12L) {
 stage_progress <- function(stage) {
   switch(
     stage,
+    listing_archive = 0,
     starting_file = 0,
     skipped_existing = 100,
     extracting_flac = 10,
@@ -180,6 +181,25 @@ stage_progress <- function(stage) {
     complete = 100,
     0
   )
+}
+
+sanitize_stream_lines <- function(lines) {
+  if (length(lines) == 0) {
+    return(character())
+  }
+
+  cleaned <- gsub("\r", "", lines, fixed = TRUE)
+  cleaned <- gsub("[[:cntrl:]]", "", cleaned)
+  cleaned[nzchar(cleaned)]
+}
+
+split_stream_text <- function(text) {
+  if (length(text) == 0 || is.null(text) || !nzchar(text)) {
+    return(character())
+  }
+
+  pieces <- unlist(strsplit(text, "\n", fixed = TRUE), use.names = FALSE)
+  sanitize_stream_lines(pieces)
 }
 
 make_ffmpeg_progress_parser <- function(input_name, output_name) {
@@ -454,20 +474,97 @@ run_monitored_birdnet_analysis <- function(script_dir,
   readRDS(result_rds)
 }
 
-list_archive_flac_members <- function(archive_path) {
-  archive_listing <- system2(
-    "tar",
+list_archive_flac_members <- function(archive_path,
+                                      manifest,
+                                      start_time,
+                                      heartbeat_seconds = 5,
+                                      timeout_seconds = Inf) {
+  process <- processx::process$new(
+    command = "tar",
     args = c("--zstd", "-tf", archive_path),
-    stdout = TRUE,
-    stderr = TRUE
+    stdout = NULL,
+    stderr = NULL,
+    cleanup_tree = TRUE,
+    pty = TRUE
   )
-  tar_status <- attr(archive_listing, "status")
 
-  if (!is.null(tar_status) && tar_status != 0) {
-    stop(paste(archive_listing, collapse = "\n"))
+  start_stage_at <- Sys.time()
+  last_report_at <- as.POSIXct(NA)
+  listing_lines <- character()
+
+  on.exit({
+    if (process$is_alive()) {
+      process$kill_tree()
+    }
+  }, add = TRUE)
+
+  repeat {
+    process$poll_io(1000)
+
+    output_text <- process$read_output()
+    output_lines <- split_stream_text(output_text)
+    if (length(output_lines) > 0) {
+      listing_lines <- c(listing_lines, output_lines)
+    }
+
+    now <- Sys.time()
+    stage_elapsed_seconds <- as.numeric(difftime(now, start_stage_at, units = "secs"))
+    flac_count <- sum(grepl("\\.flac$", listing_lines, ignore.case = TRUE))
+    detail_text <- sprintf("scanning archive members | flac_found_so_far=%d", flac_count)
+
+    if (is.na(last_report_at) ||
+        as.numeric(difftime(now, last_report_at, units = "secs")) >= heartbeat_seconds) {
+      emit_console(
+        sprintf(
+          "[archive scan] %s | stage_elapsed=%s",
+          detail_text,
+          format_duration(stage_elapsed_seconds)
+        )
+      )
+      update_live_progress(
+        manifest = manifest,
+        current_member = "",
+        current_phase = "listing_archive",
+        current_detail = paste0(detail_text, " | stage_elapsed=", format_duration(stage_elapsed_seconds)),
+        start_time = start_time,
+        total_files = 0
+      )
+      last_report_at <- now
+    }
+
+    if (!process$is_alive()) {
+      break
+    }
+
+    if (is.finite(timeout_seconds) && stage_elapsed_seconds > timeout_seconds) {
+      process$kill_tree()
+      stop(
+        sprintf(
+          "listing_archive timed out after %s",
+          format_duration(stage_elapsed_seconds)
+        )
+      )
+    }
   }
 
-  archive_listing[grepl("\\.flac$", archive_listing, ignore.case = TRUE)]
+  listing_lines <- c(
+    listing_lines,
+    split_stream_text(process$read_output())
+  )
+
+  if (!identical(process$get_exit_status(), 0L)) {
+    stop(
+      paste(
+        c(
+          "tar archive listing failed",
+          utils::tail(listing_lines, 20)
+        ),
+        collapse = "\n"
+      )
+    )
+  }
+
+  listing_lines[grepl("\\.flac$", listing_lines, ignore.case = TRUE)]
 }
 
 extract_archive_member <- function(archive_path, archive_member, target_dir) {
@@ -640,9 +737,8 @@ update_live_progress <- function(manifest,
 }
 
 dir.create(output_root, recursive = TRUE, showWarnings = FALSE)
-archive_members <- list_archive_flac_members(archive_file)
-total_files <- length(archive_members)
 start_time <- Sys.time()
+total_files <- 0L
 
 manifest <- data.frame(
   archive_member = character(),
@@ -672,6 +768,28 @@ write_summary_of_summaries_txt(
   current_phase = "starting",
   current_detail = "initializing archive run",
   current_file_progress = 0,
+  start_time = start_time,
+  total_files = total_files
+)
+
+emit_console("Starting archive run")
+emit_console(sprintf("Archive: %s", archive_file))
+emit_console("Scanning archive members; this can be slow for large .tar.zst files")
+
+archive_members <- list_archive_flac_members(
+  archive_path = archive_file,
+  manifest = manifest,
+  start_time = start_time,
+  heartbeat_seconds = stage_heartbeat_seconds,
+  timeout_seconds = stage_timeout_seconds
+)
+total_files <- length(archive_members)
+
+update_live_progress(
+  manifest = manifest,
+  current_member = "",
+  current_phase = "starting",
+  current_detail = sprintf("archive scan complete; discovered %d .flac files", total_files),
   start_time = start_time,
   total_files = total_files
 )

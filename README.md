@@ -290,9 +290,7 @@ For each recorder and each calendar month, the analysis script:
 4. treats those species-level detection counts as the abundance vector
 5. converts counts to relative abundance:
 
-```text
-<em>p<sub>i</sub></em> = <em>n<sub>i</sub></em> / <em>N</em>
-```
+<code><em>p<sub>i</sub></em> = <em>n<sub>i</sub></em> / <em>N</em></code>
 
 where:
 

@@ -104,6 +104,8 @@ You need:
 
 - R
 - the `birdnetR` package
+- the `processx` package
+- the `callr` package
 - `ffmpeg`
 - `tar` with `--zstd` support
 - `zstd`
@@ -135,6 +137,8 @@ Edit:
 - `fallback_longitude`
 - `prediction_min_confidence`
 - `summary_confidence_threshold`
+- `stage_heartbeat_seconds`
+- `stage_timeout_seconds`
 
 These control which archive is processed, which species filter is used, and how strict the prediction summaries are.
 
@@ -196,8 +200,9 @@ All archive outputs are written to the local repository drive, not back to the s
 When `Rscript scripts/process_tar_archive.R` is running, the console reports:
 
 - current file index and percent complete
+- current per-file stage percent
 - current archive member being processed
-- extraction step
+- extraction/download step
 - `.flac` to `.wav` conversion step
 - BirdNET range-filter step
 - BirdNET prediction step
@@ -205,6 +210,10 @@ When `Rscript scripts/process_tar_archive.R` is running, the console reports:
 - cleanup step
 - per-file elapsed time
 - estimated time remaining
+
+Extraction and conversion stages are now monitored through `processx`, so they emit recurring heartbeat updates instead of staying silent until the subprocess returns.
+
+BirdNET analysis is also run in a monitored child R process through `callr`, so TensorFlow/TFLite warnings should no longer make the main console progress appear frozen.
 
 ## Resume behavior
 
@@ -260,7 +269,17 @@ If `tar --zstd` fails for a specific member, that file is recorded as:
 
 and processing continues.
 
-### 8. Interrupted runs
+### 8. Slow extraction from `.tar.zst`
+
+This workflow extracts one archive member at a time. For compressed `.tar.zst` archives, that can still be slow because `tar` may need to scan or decompress a large portion of the archive to reach a later member.
+
+That means a file can legitimately spend a long time in the extraction/download stage even when it is not frozen. The script now emits heartbeat updates during that stage so you can tell the process is still alive.
+
+### 9. Slow BirdNET inference
+
+BirdNET model startup and inference can also take a long time, especially on the first files of a run while Python/model dependencies initialize. The archive runner now polls that stage from a child R process and keeps updating console and text progress during analysis.
+
+### 10. Interrupted runs
 
 If the process is interrupted, rerun:
 

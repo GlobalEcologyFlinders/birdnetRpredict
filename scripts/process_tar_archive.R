@@ -18,6 +18,14 @@ get_script_dir <- function() {
 script_dir <- get_script_dir()
 source(file.path(script_dir, "birdnet_helpers.R"))
 
+if (!requireNamespace("processx", quietly = TRUE)) {
+  stop("The processx package is required for live progress monitoring. Install it with install.packages('processx').")
+}
+
+if (!requireNamespace("callr", quietly = TRUE)) {
+  stop("The callr package is required for monitored BirdNET execution. Install it with install.packages('callr').")
+}
+
 archive_file <- normalizePath(
   "/Volumes/bradshaw/acoustic/GEL_A/GEL_A202508202025_12312025.tar.zst",
   mustWork = TRUE
@@ -47,8 +55,10 @@ extract_root <- file.path(tempdir(), archive_name, "extract")
 manifest_csv <- file.path(output_root, paste0(archive_name, "_processing_manifest.csv"))
 file_results_txt <- file.path(output_root, paste0(archive_name, "_file_results.txt"))
 summary_of_summaries_txt <- file.path(output_root, paste0(archive_name, "_summary_of_summaries.txt"))
+stage_heartbeat_seconds <- 5
+stage_timeout_seconds <- 3600
 
-pipeline <- initialize_birdnet_pipeline(
+pipeline_settings <- list(
   species_csv = species_csv,
   timezone = "Australia/Adelaide",
   fallback_latitude = -35.52235,
@@ -170,6 +180,278 @@ stage_progress <- function(stage) {
     complete = 100,
     0
   )
+}
+
+make_ffmpeg_progress_parser <- function(input_name, output_name) {
+  latest_out_time <- NULL
+  latest_progress <- NULL
+
+  function(lines) {
+    if (length(lines) > 0) {
+      for (line in lines) {
+        if (grepl("^out_time=", line)) {
+          latest_out_time <<- sub("^out_time=", "", line)
+        } else if (grepl("^progress=", line)) {
+          latest_progress <<- sub("^progress=", "", line)
+        }
+      }
+    }
+
+    detail <- sprintf("converting %s -> %s", input_name, output_name)
+
+    if (!is.null(latest_out_time) && nzchar(latest_out_time)) {
+      detail <- paste0(detail, " | encoded=", latest_out_time)
+    }
+
+    if (!is.null(latest_progress) && nzchar(latest_progress)) {
+      detail <- paste0(detail, " | ffmpeg=", latest_progress)
+    }
+
+    detail
+  }
+}
+
+run_monitored_command <- function(command,
+                                  args,
+                                  phase_prefix,
+                                  archive_member,
+                                  stage,
+                                  start_time,
+                                  total_files,
+                                  manifest,
+                                  detail_text,
+                                  heartbeat_seconds = 5,
+                                  timeout_seconds = Inf,
+                                  detail_parser = NULL) {
+  process <- processx::process$new(
+    command = command,
+    args = args,
+    stdout = "|",
+    stderr = "|",
+    cleanup_tree = TRUE
+  )
+
+  start_stage_at <- Sys.time()
+  last_report_at <- as.POSIXct(NA)
+  collected_output <- character()
+  current_detail <- detail_text
+
+  on.exit({
+    if (process$is_alive()) {
+      process$kill_tree()
+    }
+  }, add = TRUE)
+
+  repeat {
+    process$poll_io(1000)
+
+    stdout_lines <- process$read_output_lines()
+    stderr_lines <- process$read_error_lines()
+
+    if (length(stdout_lines) > 0 || length(stderr_lines) > 0) {
+      collected_output <- c(collected_output, stdout_lines, stderr_lines)
+      if (!is.null(detail_parser)) {
+        current_detail <- detail_parser(c(stdout_lines, stderr_lines))
+      }
+    }
+
+    now <- Sys.time()
+    stage_elapsed_seconds <- as.numeric(difftime(now, start_stage_at, units = "secs"))
+
+    if (is.na(last_report_at) ||
+        as.numeric(difftime(now, last_report_at, units = "secs")) >= heartbeat_seconds) {
+      emit_console(
+        sprintf(
+          "%s [file %.1f%%] %s | stage_elapsed=%s",
+          phase_prefix,
+          stage_progress(stage),
+          current_detail,
+          format_duration(stage_elapsed_seconds)
+        )
+      )
+      update_live_progress(
+        manifest = manifest,
+        current_member = archive_member,
+        current_phase = stage,
+        current_detail = paste0(current_detail, " | stage_elapsed=", format_duration(stage_elapsed_seconds)),
+        start_time = start_time,
+        total_files = total_files
+      )
+      last_report_at <- now
+    }
+
+    if (!process$is_alive()) {
+      break
+    }
+
+    if (is.finite(timeout_seconds) && stage_elapsed_seconds > timeout_seconds) {
+      process$kill_tree()
+      stop(
+        sprintf(
+          "%s timed out after %s for %s",
+          stage,
+          format_duration(stage_elapsed_seconds),
+          archive_member
+        )
+      )
+    }
+  }
+
+  collected_output <- c(collected_output, process$read_output_lines(), process$read_error_lines())
+
+  if (!identical(process$get_exit_status(), 0L)) {
+    stop(
+      paste(
+        c(
+          sprintf("%s failed for %s", command, archive_member),
+          utils::tail(collected_output, 20)
+        ),
+        collapse = "\n"
+      )
+    )
+  }
+
+  invisible(collected_output)
+}
+
+run_monitored_birdnet_analysis <- function(script_dir,
+                                           pipeline_settings,
+                                           wav_path,
+                                           output_dir,
+                                           output_stem,
+                                           phase_prefix,
+                                           archive_member,
+                                           start_time,
+                                           total_files,
+                                           manifest,
+                                           heartbeat_seconds = 5,
+                                           timeout_seconds = Inf) {
+  result_rds <- tempfile(pattern = "birdnet-result-", fileext = ".rds")
+
+  bg <- callr::r_bg(
+    func = function(script_dir,
+                    pipeline_settings,
+                    wav_path,
+                    output_dir,
+                    output_stem,
+                    result_rds) {
+      suppressPackageStartupMessages(source(file.path(script_dir, "birdnet_helpers.R")))
+
+      pipeline <- do.call(initialize_birdnet_pipeline, pipeline_settings)
+      result <- process_audio_file(
+        pipeline = pipeline,
+        audio_file = wav_path,
+        output_dir = output_dir,
+        output_stem = output_stem,
+        allow_empty_summary = TRUE
+      )
+
+      saveRDS(result, result_rds)
+      invisible(NULL)
+    },
+    args = list(
+      script_dir = script_dir,
+      pipeline_settings = pipeline_settings,
+      wav_path = wav_path,
+      output_dir = output_dir,
+      output_stem = output_stem,
+      result_rds = result_rds
+    ),
+    stdout = "|",
+    stderr = "|",
+    supervise = TRUE
+  )
+
+  start_stage_at <- Sys.time()
+  last_report_at <- as.POSIXct(NA)
+  output_lines <- character()
+
+  on.exit({
+    if (bg$is_alive()) {
+      bg$kill()
+    }
+    if (file.exists(result_rds)) {
+      unlink(result_rds)
+    }
+  }, add = TRUE)
+
+  repeat {
+    bg$poll_io(1000)
+
+    stdout_lines <- bg$read_output_lines()
+    stderr_lines <- bg$read_error_lines()
+    if (length(stdout_lines) > 0 || length(stderr_lines) > 0) {
+      output_lines <- c(output_lines, stdout_lines, stderr_lines)
+    }
+
+    now <- Sys.time()
+    stage_elapsed_seconds <- as.numeric(difftime(now, start_stage_at, units = "secs"))
+    recent_output <- trimws(paste(utils::tail(output_lines[nzchar(output_lines)], 2), collapse = " | "))
+    current_detail <- sprintf("analysing %s", basename(wav_path))
+    if (nzchar(recent_output)) {
+      current_detail <- paste0(current_detail, " | last_output=", recent_output)
+    }
+
+    if (is.na(last_report_at) ||
+        as.numeric(difftime(now, last_report_at, units = "secs")) >= heartbeat_seconds) {
+      emit_console(
+        sprintf(
+          "%s [file %.1f%%] %s | stage_elapsed=%s",
+          phase_prefix,
+          stage_progress("running_birdnet"),
+          current_detail,
+          format_duration(stage_elapsed_seconds)
+        )
+      )
+      update_live_progress(
+        manifest = manifest,
+        current_member = archive_member,
+        current_phase = "running_birdnet",
+        current_detail = paste0(current_detail, " | stage_elapsed=", format_duration(stage_elapsed_seconds)),
+        start_time = start_time,
+        total_files = total_files
+      )
+      last_report_at <- now
+    }
+
+    if (!bg$is_alive()) {
+      break
+    }
+
+    if (is.finite(timeout_seconds) && stage_elapsed_seconds > timeout_seconds) {
+      bg$kill()
+      stop(
+        sprintf(
+          "running_birdnet timed out after %s for %s",
+          format_duration(stage_elapsed_seconds),
+          archive_member
+        )
+      )
+    }
+  }
+
+  stdout_lines <- bg$read_output_lines()
+  stderr_lines <- bg$read_error_lines()
+  output_lines <- c(output_lines, stdout_lines, stderr_lines)
+
+  status <- bg$get_exit_status()
+  if (!identical(status, 0L)) {
+    stop(
+      paste(
+        c(
+          sprintf("BirdNET analysis failed for %s", archive_member),
+          utils::tail(output_lines, 20)
+        ),
+        collapse = "\n"
+      )
+    )
+  }
+
+  if (!file.exists(result_rds)) {
+    stop("BirdNET analysis completed without producing a result file for ", archive_member)
+  }
+
+  readRDS(result_rds)
 }
 
 list_archive_flac_members <- function(archive_path) {
@@ -459,54 +741,29 @@ for (file_index in seq_along(archive_members)) {
   unlink(extract_root, recursive = TRUE, force = TRUE)
   dir.create(extract_root, recursive = TRUE, showWarnings = FALSE)
 
-  stage_callback <- function(stage, audio_file_path) {
-    stage_message <- switch(
-      stage,
-      building_range_filter = "building BirdNET range filter",
-      running_birdnet = "running BirdNET prediction",
-      writing_empty_summary = "writing empty summary outputs",
-      writing_summary = "writing prediction outputs",
-      stage
-    )
-
-    emit_console(
-      sprintf(
-        "%s [file %.1f%%] %s for %s",
-        phase_prefix,
-        stage_progress(stage),
-        stage_message,
-        basename(audio_file_path)
-      )
-    )
-    update_live_progress(
-      manifest = manifest,
-      current_member = archive_member,
-      current_phase = stage,
-      current_detail = sprintf("%s: %s", stage_message, basename(audio_file_path)),
-      start_time = start_time,
-      total_files = total_files
-    )
-  }
-
   result <- tryCatch(
     {
-      emit_console(
-        sprintf(
-          "%s [file %.1f%%] downloading/extracting %s",
-          phase_prefix,
-          stage_progress("extracting_flac"),
-          archive_member
-        )
-      )
-      update_live_progress(
-        manifest = manifest,
-        current_member = archive_member,
-        current_phase = "extracting_flac",
-        current_detail = sprintf("downloading/extracting from archive: %s", archive_member),
+      flac_path <- file.path(extract_root, archive_member)
+      dir.create(dirname(flac_path), recursive = TRUE, showWarnings = FALSE)
+
+      run_monitored_command(
+        command = "tar",
+        args = c("--zstd", "-xvf", archive_file, "-C", extract_root, archive_member),
+        phase_prefix = phase_prefix,
+        archive_member = archive_member,
+        stage = "extracting_flac",
         start_time = start_time,
-        total_files = total_files
+        total_files = total_files,
+        manifest = manifest,
+        detail_text = sprintf("downloading/extracting from archive: %s", archive_member),
+        heartbeat_seconds = stage_heartbeat_seconds,
+        timeout_seconds = stage_timeout_seconds
       )
-      flac_path <- extract_archive_member(archive_file, archive_member, extract_root)
+
+      if (!file.exists(flac_path)) {
+        stop("tar completed without producing expected file: ", flac_path)
+      }
+
       update_live_progress(
         manifest = manifest,
         current_member = archive_member,
@@ -521,24 +778,34 @@ for (file_index in seq_along(archive_members)) {
         sub("\\.flac$", ".wav", archive_member, ignore.case = TRUE)
       )
 
-      emit_console(
-        sprintf(
-          "%s [file %.1f%%] converting %s -> %s",
-          phase_prefix,
-          stage_progress("converting_wav"),
-          basename(flac_path),
-          basename(wav_path)
-        )
-      )
-      update_live_progress(
-        manifest = manifest,
-        current_member = archive_member,
-        current_phase = "converting_wav",
-        current_detail = sprintf("converting %s -> %s", basename(flac_path), basename(wav_path)),
+      run_monitored_command(
+        command = "ffmpeg",
+        args = c(
+          "-hide_banner",
+          "-nostats",
+          "-progress",
+          "pipe:1",
+          "-y",
+          "-i",
+          flac_path,
+          wav_path
+        ),
+        phase_prefix = phase_prefix,
+        archive_member = archive_member,
+        stage = "converting_wav",
         start_time = start_time,
-        total_files = total_files
+        total_files = total_files,
+        manifest = manifest,
+        detail_text = sprintf("converting %s -> %s", basename(flac_path), basename(wav_path)),
+        heartbeat_seconds = stage_heartbeat_seconds,
+        timeout_seconds = stage_timeout_seconds,
+        detail_parser = make_ffmpeg_progress_parser(basename(flac_path), basename(wav_path))
       )
-      convert_flac_to_wav(flac_path, wav_path)
+
+      if (!file.exists(wav_path)) {
+        stop("ffmpeg completed without producing expected file: ", wav_path)
+      }
+
       update_live_progress(
         manifest = manifest,
         current_member = archive_member,
@@ -548,13 +815,19 @@ for (file_index in seq_along(archive_members)) {
         total_files = total_files
       )
 
-      processed <- process_audio_file(
-        pipeline = pipeline,
-        audio_file = wav_path,
+      processed <- run_monitored_birdnet_analysis(
+        script_dir = script_dir,
+        pipeline_settings = pipeline_settings,
+        wav_path = wav_path,
         output_dir = dirname(output_paths$summary_csv),
         output_stem = tools::file_path_sans_ext(basename(archive_member)),
-        allow_empty_summary = TRUE,
-        progress_callback = stage_callback
+        phase_prefix = phase_prefix,
+        archive_member = archive_member,
+        start_time = start_time,
+        total_files = total_files,
+        manifest = manifest,
+        heartbeat_seconds = stage_heartbeat_seconds,
+        timeout_seconds = stage_timeout_seconds
       )
 
       processed$error_message <- ""

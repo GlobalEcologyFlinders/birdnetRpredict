@@ -52,8 +52,8 @@ birdnetRpredict/
 `scripts/process_tar_archive.R`:
 
 1. opens a source `.tar.zst`
-2. lists `.flac` members inside the archive
-3. processes files one at a time
+2. streams the archive sequentially instead of doing a full pre-scan
+3. starts processing as soon as the next `.flac` is encountered
 4. extracts a single `.flac` while preserving the internal archive path
 5. converts that `.flac` to `.wav` with `ffmpeg`
 6. runs the same BirdNET summary workflow used by the single-file script
@@ -61,7 +61,8 @@ birdnetRpredict/
 8. deletes the temporary extracted `.flac` and `.wav`
 9. moves to the next archive member until the archive is complete
 
-This avoids unpacking the entire archive at once.
+This avoids unpacking the entire archive at once and avoids waiting for a full member enumeration before processing starts.
+macOS sidecar entries such as `._*.flac` and `__MACOSX/` metadata are skipped during archive streaming.
 
 ## How coordinates and date are determined
 
@@ -202,6 +203,7 @@ When `Rscript scripts/process_tar_archive.R` is running, the console reports:
 - current file index and percent complete
 - current per-file stage percent
 - current archive member being processed
+- archive streaming progress
 - extraction/download step
 - `.flac` to `.wav` conversion step
 - BirdNET range-filter step
@@ -211,7 +213,7 @@ When `Rscript scripts/process_tar_archive.R` is running, the console reports:
 - per-file elapsed time
 - estimated time remaining
 
-Extraction and conversion stages are now monitored through `processx`, so they emit recurring heartbeat updates instead of staying silent until the subprocess returns.
+Archive streaming, extraction, and conversion stages are monitored through `processx`, so they emit recurring heartbeat updates instead of staying silent until the subprocess returns.
 
 BirdNET analysis is also run in a monitored child R process through `callr`, so TensorFlow/TFLite warnings should no longer make the main console progress appear frozen.
 

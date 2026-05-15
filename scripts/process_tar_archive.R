@@ -202,6 +202,33 @@ split_stream_text <- function(text) {
   sanitize_stream_lines(pieces)
 }
 
+consume_stream_text <- function(buffer, text) {
+  if (length(text) == 0 || is.null(text) || !nzchar(text)) {
+    return(list(lines = character(), buffer = buffer))
+  }
+
+  combined <- paste0(buffer, text)
+  pieces <- unlist(strsplit(combined, "\n", fixed = TRUE), use.names = FALSE)
+
+  if (endsWith(combined, "\n")) {
+    complete <- pieces
+    buffer <- ""
+  } else {
+    if (length(pieces) == 0) {
+      complete <- character()
+      buffer <- combined
+    } else {
+      complete <- pieces[-length(pieces)]
+      buffer <- pieces[length(pieces)]
+    }
+  }
+
+  list(
+    lines = sanitize_stream_lines(complete),
+    buffer = buffer
+  )
+}
+
 make_ffmpeg_progress_parser <- function(input_name, output_name) {
   latest_out_time <- NULL
   latest_progress <- NULL
@@ -491,6 +518,7 @@ list_archive_flac_members <- function(archive_path,
   start_stage_at <- Sys.time()
   last_report_at <- as.POSIXct(NA)
   listing_lines <- character()
+  listing_buffer <- ""
 
   on.exit({
     if (process$is_alive()) {
@@ -502,15 +530,24 @@ list_archive_flac_members <- function(archive_path,
     process$poll_io(1000)
 
     output_text <- process$read_output()
-    output_lines <- split_stream_text(output_text)
+    parsed_output <- consume_stream_text(listing_buffer, output_text)
+    output_lines <- parsed_output$lines
+    listing_buffer <- parsed_output$buffer
     if (length(output_lines) > 0) {
       listing_lines <- c(listing_lines, output_lines)
     }
 
     now <- Sys.time()
     stage_elapsed_seconds <- as.numeric(difftime(now, start_stage_at, units = "secs"))
+    member_count <- length(listing_lines)
     flac_count <- sum(grepl("\\.flac$", listing_lines, ignore.case = TRUE))
-    detail_text <- sprintf("scanning archive members | flac_found_so_far=%d", flac_count)
+    latest_member <- if (member_count > 0) tail(listing_lines, 1) else "none"
+    detail_text <- sprintf(
+      "scanning archive members | members_seen=%d | flac_found_so_far=%d | latest_member=%s",
+      member_count,
+      flac_count,
+      latest_member
+    )
 
     if (is.na(last_report_at) ||
         as.numeric(difftime(now, last_report_at, units = "secs")) >= heartbeat_seconds) {
@@ -547,10 +584,11 @@ list_archive_flac_members <- function(archive_path,
     }
   }
 
-  listing_lines <- c(
-    listing_lines,
-    split_stream_text(process$read_output())
-  )
+  parsed_output <- consume_stream_text(listing_buffer, process$read_output())
+  listing_lines <- c(listing_lines, parsed_output$lines)
+  if (nzchar(parsed_output$buffer)) {
+    listing_lines <- c(listing_lines, sanitize_stream_lines(parsed_output$buffer))
+  }
 
   if (!identical(process$get_exit_status(), 0L)) {
     stop(
@@ -736,70 +774,53 @@ update_live_progress <- function(manifest,
   )
 }
 
-dir.create(output_root, recursive = TRUE, showWarnings = FALSE)
-start_time <- Sys.time()
-total_files <- 0L
+parse_archive_stream_event <- function(line) {
+  fields <- strsplit(line, "\t", fixed = TRUE)[[1]]
+  event <- fields[1]
 
-manifest <- data.frame(
-  archive_member = character(),
-  status = character(),
-  started_at = character(),
-  finished_at = character(),
-  processing_seconds = numeric(),
-  processing_time_hms = character(),
-  recording_date = character(),
-  recording_latitude = numeric(),
-  recording_longitude = numeric(),
-  predictions_csv = character(),
-  summary_csv = character(),
-  summary_rows = integer(),
-  total_species_identified = integer(),
-  species_detected = character(),
-  error_message = character(),
-  stringsAsFactors = FALSE
-)
+  if (identical(event, "SCAN") && length(fields) >= 4) {
+    return(list(
+      event = event,
+      members_seen = as.integer(fields[2]),
+      flac_found_so_far = as.integer(fields[3]),
+      latest_member = fields[4]
+    ))
+  }
 
-write_file_results_txt(manifest, file_results_txt)
-write_summary_of_summaries_txt(
-  manifest = manifest,
-  output_path = summary_of_summaries_txt,
-  archive_file = archive_file,
-  current_member = "",
-  current_phase = "starting",
-  current_detail = "initializing archive run",
-  current_file_progress = 0,
-  start_time = start_time,
-  total_files = total_files
-)
+  if (identical(event, "FILE") && length(fields) >= 5) {
+    return(list(
+      event = event,
+      members_seen = as.integer(fields[2]),
+      flac_found_so_far = as.integer(fields[3]),
+      archive_member = fields[4],
+      flac_path = fields[5]
+    ))
+  }
 
-emit_console("Starting archive run")
-emit_console(sprintf("Archive: %s", archive_file))
-emit_console("Scanning archive members; this can be slow for large .tar.zst files")
+  if (identical(event, "COMPLETE") && length(fields) >= 3) {
+    return(list(
+      event = event,
+      members_seen = as.integer(fields[2]),
+      flac_found_so_far = as.integer(fields[3])
+    ))
+  }
 
-archive_members <- list_archive_flac_members(
-  archive_path = archive_file,
-  manifest = manifest,
-  start_time = start_time,
-  heartbeat_seconds = stage_heartbeat_seconds,
-  timeout_seconds = stage_timeout_seconds
-)
-total_files <- length(archive_members)
+  if (identical(event, "ERROR")) {
+    return(list(
+      event = event,
+      error_message = paste(fields[-1], collapse = "\t")
+    ))
+  }
 
-update_live_progress(
-  manifest = manifest,
-  current_member = "",
-  current_phase = "starting",
-  current_detail = sprintf("archive scan complete; discovered %d .flac files", total_files),
-  start_time = start_time,
-  total_files = total_files
-)
+  list(event = "RAW", raw = line)
+}
 
-emit_console(sprintf("Starting archive run for %d .flac files", total_files))
-emit_console(sprintf("Progress summary text: %s", summary_of_summaries_txt))
-emit_console(sprintf("Per-file results text: %s", file_results_txt))
-
-for (file_index in seq_along(archive_members)) {
-  archive_member <- archive_members[file_index]
+process_streamed_flac <- function(archive_member,
+                                  flac_path,
+                                  file_index,
+                                  total_files,
+                                  manifest,
+                                  start_time) {
   output_paths <- output_paths_for_member(output_root, archive_member)
   file_started_at <- Sys.time()
   phase_prefix <- sprintf("[%s]", progress_label(file_index, total_files))
@@ -809,7 +830,7 @@ for (file_index in seq_along(archive_members)) {
     manifest = manifest,
     current_member = archive_member,
     current_phase = "starting_file",
-    current_detail = sprintf("queued for processing: %s", archive_member),
+    current_detail = sprintf("ready for processing: %s", archive_member),
     start_time = start_time,
     total_files = total_files
   )
@@ -851,50 +872,23 @@ for (file_index in seq_along(archive_members)) {
       start_time = start_time,
       total_files = total_files
     )
-
     emit_console(sprintf("%s Skipping existing results for %s", phase_prefix, archive_member))
-    next
+    unlink(flac_path, force = TRUE)
+    return(manifest)
   }
-
-  unlink(extract_root, recursive = TRUE, force = TRUE)
-  dir.create(extract_root, recursive = TRUE, showWarnings = FALSE)
 
   result <- tryCatch(
     {
-      flac_path <- file.path(extract_root, archive_member)
-      dir.create(dirname(flac_path), recursive = TRUE, showWarnings = FALSE)
-
-      run_monitored_command(
-        command = "tar",
-        args = c("--zstd", "-xvf", archive_file, "-C", extract_root, archive_member),
-        phase_prefix = phase_prefix,
-        archive_member = archive_member,
-        stage = "extracting_flac",
-        start_time = start_time,
-        total_files = total_files,
-        manifest = manifest,
-        detail_text = sprintf("downloading/extracting from archive: %s", archive_member),
-        heartbeat_seconds = stage_heartbeat_seconds,
-        timeout_seconds = stage_timeout_seconds
-      )
-
-      if (!file.exists(flac_path)) {
-        stop("tar completed without producing expected file: ", flac_path)
-      }
-
       update_live_progress(
         manifest = manifest,
         current_member = archive_member,
         current_phase = "extracted_flac",
-        current_detail = sprintf("downloaded/extracted .flac: %s", basename(flac_path)),
+        current_detail = sprintf("stream-extracted .flac ready: %s", basename(flac_path)),
         start_time = start_time,
         total_files = total_files
       )
 
-      wav_path <- file.path(
-        extract_root,
-        sub("\\.flac$", ".wav", archive_member, ignore.case = TRUE)
-      )
+      wav_path <- sub("\\.flac$", ".wav", flac_path, ignore.case = TRUE)
 
       run_monitored_command(
         command = "ffmpeg",
@@ -976,7 +970,8 @@ for (file_index in seq_along(archive_members)) {
     start_time = start_time,
     total_files = total_files
   )
-  unlink(extract_root, recursive = TRUE, force = TRUE)
+  unlink(flac_path, force = TRUE)
+  unlink(sub("\\.flac$", ".wav", flac_path, ignore.case = TRUE), force = TRUE)
 
   file_finished_at <- Sys.time()
   processing_seconds <- as.numeric(difftime(file_finished_at, file_started_at, units = "secs"))
@@ -1032,6 +1027,157 @@ for (file_index in seq_along(archive_members)) {
       format_duration(eta_seconds)
     )
   )
+
+  manifest
+}
+
+dir.create(output_root, recursive = TRUE, showWarnings = FALSE)
+start_time <- Sys.time()
+total_files <- 0L
+members_seen <- 0L
+scan_complete <- FALSE
+
+manifest <- data.frame(
+  archive_member = character(),
+  status = character(),
+  started_at = character(),
+  finished_at = character(),
+  processing_seconds = numeric(),
+  processing_time_hms = character(),
+  recording_date = character(),
+  recording_latitude = numeric(),
+  recording_longitude = numeric(),
+  predictions_csv = character(),
+  summary_csv = character(),
+  summary_rows = integer(),
+  total_species_identified = integer(),
+  species_detected = character(),
+  error_message = character(),
+  stringsAsFactors = FALSE
+)
+
+write_file_results_txt(manifest, file_results_txt)
+write_summary_of_summaries_txt(
+  manifest = manifest,
+  output_path = summary_of_summaries_txt,
+  archive_file = archive_file,
+  current_member = "",
+  current_phase = "starting",
+  current_detail = "initializing archive run",
+  current_file_progress = 0,
+  start_time = start_time,
+  total_files = total_files
+)
+
+emit_console("Starting archive run")
+emit_console(sprintf("Archive: %s", archive_file))
+emit_console("Streaming archive members; processing starts as soon as a .flac is found")
+emit_console(sprintf("Progress summary text: %s", summary_of_summaries_txt))
+emit_console(sprintf("Per-file results text: %s", file_results_txt))
+
+unlink(extract_root, recursive = TRUE, force = TRUE)
+dir.create(extract_root, recursive = TRUE, showWarnings = FALSE)
+
+stream_helper <- processx::process$new(
+  command = "python",
+  args = c(
+    file.path(script_dir, "stream_archive_flacs.py"),
+    archive_file,
+    extract_root,
+    as.character(stage_heartbeat_seconds)
+  ),
+  stdin = "|",
+  stdout = "|",
+  stderr = "|",
+  cleanup_tree = TRUE
+)
+
+on.exit({
+  if (exists("stream_helper") && stream_helper$is_alive()) {
+    try(stream_helper$write_input("STOP\n"), silent = TRUE)
+    try(stream_helper$kill_tree(), silent = TRUE)
+  }
+}, add = TRUE)
+
+repeat {
+  stream_helper$poll_io(1000)
+
+  helper_stdout <- stream_helper$read_output_lines()
+  helper_stderr <- stream_helper$read_error_lines()
+
+  if (length(helper_stderr) > 0) {
+    emit_console(sprintf("[archive stream] helper stderr: %s", paste(helper_stderr, collapse = " | ")))
+  }
+
+  if (length(helper_stdout) > 0) {
+    for (line in helper_stdout) {
+      event <- parse_archive_stream_event(line)
+
+      if (identical(event$event, "SCAN")) {
+        members_seen <- event$members_seen
+        total_files <- max(total_files, event$flac_found_so_far)
+        detail_text <- sprintf(
+          "streaming archive | members_seen=%d | flac_found_so_far=%d | latest_member=%s",
+          event$members_seen,
+          event$flac_found_so_far,
+          event$latest_member
+        )
+        emit_console(sprintf("[archive stream] %s", detail_text))
+        update_live_progress(
+          manifest = manifest,
+          current_member = "",
+          current_phase = "listing_archive",
+          current_detail = detail_text,
+          start_time = start_time,
+          total_files = total_files
+        )
+      } else if (identical(event$event, "FILE")) {
+        members_seen <- event$members_seen
+        total_files <- max(total_files, event$flac_found_so_far)
+        manifest <- process_streamed_flac(
+          archive_member = event$archive_member,
+          flac_path = event$flac_path,
+          file_index = event$flac_found_so_far,
+          total_files = total_files,
+          manifest = manifest,
+          start_time = start_time
+        )
+        stream_helper$write_input("NEXT\n")
+      } else if (identical(event$event, "COMPLETE")) {
+        members_seen <- event$members_seen
+        total_files <- event$flac_found_so_far
+        scan_complete <- TRUE
+        emit_console(sprintf("Archive stream complete. Members seen: %d, flac files found: %d", members_seen, total_files))
+        update_live_progress(
+          manifest = manifest,
+          current_member = "",
+          current_phase = "starting",
+          current_detail = sprintf("archive stream complete; discovered %d .flac files", total_files),
+          start_time = start_time,
+          total_files = total_files
+        )
+      } else if (identical(event$event, "ERROR")) {
+        stop(event$error_message)
+      }
+    }
+  }
+
+  if (!stream_helper$is_alive()) {
+    break
+  }
+}
+
+if (!scan_complete) {
+  final_status <- stream_helper$get_exit_status()
+  if (!identical(final_status, 0L)) {
+    helper_tail <- c(stream_helper$read_output_lines(), stream_helper$read_error_lines())
+    stop(
+      paste(
+        c("archive stream helper failed", utils::tail(helper_tail, 20)),
+        collapse = "\n"
+      )
+    )
+  }
 }
 
 write_summary_of_summaries_txt(

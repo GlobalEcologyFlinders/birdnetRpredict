@@ -280,6 +280,64 @@ The analysis workflow writes:
 In the species-frequency plot, the identification axis is shown on a log10 scale, and common names are displayed in lowercase except where proper nouns remain capitalised.
 Monthly diversity metrics treat the number of detections per species as the abundance proxy for Shannon, Simpson, and Hill-number calculations, and are plotted as recorder-by-month time series.
 
+### Diversity-metric calculations
+
+For each recorder and each calendar month, the analysis script:
+
+1. filters detections to those meeting `min_confidence`
+2. groups the remaining detections by recorder and month
+3. counts the number of detections for each species within that recorder-month
+4. treats those species-level detection counts as the abundance vector
+5. converts counts to relative abundance:
+
+```text
+p_i = n_i / N
+```
+
+where:
+
+- `n_i` = number of detections for species `i`
+- `N` = total number of detections across all species in that recorder-month
+- `p_i` = relative abundance of species `i`
+
+The diversity metrics are then calculated as follows.
+
+#### Shannon diversity index
+
+```text
+H' = -Σ (p_i ln p_i)
+```
+
+#### Simpson diversity index
+
+The script reports the Gini-Simpson form:
+
+```text
+1 - Σ (p_i^2)
+```
+
+#### Hill number, q = 1
+
+This is the exponential of Shannon diversity:
+
+```text
+^1D = exp(H')
+```
+
+#### Hill number, q = 2
+
+This is the inverse Simpson concentration:
+
+```text
+^2D = 1 / Σ (p_i^2)
+```
+
+Interpretation in this workflow:
+
+- larger Shannon and Hill `q = 1` values indicate greater effective diversity with sensitivity to both common and less-common species
+- larger Simpson and Hill `q = 2` values indicate greater diversity with stronger weighting toward the most frequently detected species
+- because the pipeline uses detections rather than direct counts of individuals, these are diversity estimates based on the assumption that detection frequency is a reasonable proxy for relative abundance
+
 ## Console progress during archive runs
 
 When `Rscript scripts/process_tar_archive.R` is running, the console reports:

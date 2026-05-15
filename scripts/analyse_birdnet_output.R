@@ -1394,12 +1394,13 @@ if (length(periodicity_frames) > 0) {
 }
 
 if (nrow(periodicity_by_recorder) > 0) {
+  periodicity_by_recorder$facet_label <- paste(periodicity_by_recorder$recorder_id, periodicity_by_recorder$panel, sep = "\n")
   periodicity_by_recorder_plot <- ggplot2::ggplot(
     periodicity_by_recorder,
     ggplot2::aes(x = x_value, y = y_value)
   ) +
     ggplot2::geom_line(linewidth = 0.9, colour = "firebrick3") +
-    ggplot2::facet_grid(recorder_id ~ panel, scales = "free") +
+    ggplot2::facet_wrap(~facet_label, scales = "free", ncol = 2) +
     ggplot2::labs(
       title = "temporal periodicity of identification rates by recorder",
       subtitle = plot_subtitle,
@@ -1411,7 +1412,7 @@ if (nrow(periodicity_by_recorder) > 0) {
   if (any(periodicity_by_recorder$panel == "autocorrelation")) {
     periodicity_by_recorder_plot <- periodicity_by_recorder_plot +
       ggplot2::geom_hline(
-        data = unique(periodicity_by_recorder[periodicity_by_recorder$panel == "autocorrelation", "recorder_id", drop = FALSE]),
+        data = unique(periodicity_by_recorder[periodicity_by_recorder$panel == "autocorrelation", "facet_label", drop = FALSE]),
         ggplot2::aes(yintercept = 0),
         inherit.aes = FALSE,
         linetype = "dashed",

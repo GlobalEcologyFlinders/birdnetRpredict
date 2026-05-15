@@ -6,7 +6,7 @@ The audio-file repository is available at <a href="https://api.ecosounds.org/pro
 
 ## Workflow
 
-R-based BirdNET workflow for:
+R-based <a href="https://birdnet.cornell.edu">BirdNET</a> workflow for:
 
 1. processing a single audio file
 2. processing a large `.tar.zst` archive one `.flac` at a time

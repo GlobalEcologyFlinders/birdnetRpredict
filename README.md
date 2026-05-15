@@ -291,7 +291,7 @@ For each recorder and each calendar month, the analysis script:
 5. converts counts to relative abundance:
 
 ```text
-p_i = n_i / N
+<em>p<sub>i</sub></em> = <em>n<sub>i</sub></em> / <em>N</em>
 ```
 
 where:

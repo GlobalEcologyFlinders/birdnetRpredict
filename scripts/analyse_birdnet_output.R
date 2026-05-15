@@ -1176,7 +1176,7 @@ species_counts_plot <- ggplot2::ggplot(
     title = "identifications per species",
     subtitle = sprintf("minimum confidence: %.3f", min_confidence),
     x = "species",
-    y = "number of identifications (log10 scale)"
+    y = expression("number of identifications (" * log[10] * " scale)")
   ) +
   ggplot2::theme_minimal(base_size = 12) +
   ggplot2::theme(
@@ -1207,7 +1207,7 @@ species_counts_by_month_plot <- ggplot2::ggplot(
     title = "identifications per species by month",
     subtitle = sprintf("minimum confidence: %.3f", min_confidence),
     x = "species",
-    y = "number of identifications (log10 scale)"
+    y = expression("number of identifications (" * log[10] * " scale)")
   ) +
   ggplot2::theme_minimal(base_size = 12) +
   ggplot2::theme(
@@ -1282,7 +1282,7 @@ species_counts_by_recorder_plot <- ggplot2::ggplot(
     title = "identifications per species by recorder",
     subtitle = sprintf("minimum confidence: %.3f", min_confidence),
     x = "species",
-    y = "number of identifications (log10 scale)"
+    y = expression("number of identifications (" * log[10] * " scale)")
   ) +
   ggplot2::theme_minimal(base_size = 12) +
   ggplot2::theme(
@@ -1313,7 +1313,7 @@ species_counts_by_month_by_recorder_plot <- ggplot2::ggplot(
     title = "identifications per species by recorder and month",
     subtitle = sprintf("minimum confidence: %.3f", min_confidence),
     x = "species",
-    y = "number of identifications (log10 scale)"
+    y = expression("number of identifications (" * log[10] * " scale)")
   ) +
   ggplot2::theme_minimal(base_size = 12) +
   ggplot2::theme(
@@ -1426,7 +1426,7 @@ if (nrow(periodicity_by_recorder) > 0) {
   )
 }
 
-if (isTRUE(show_plots_in_session)) {
+if (isTRUE(show_plots_in_session) && interactive()) {
   print(time_series_plot)
   print(cumulative_species_plot)
   print(species_counts_plot)
@@ -1599,7 +1599,7 @@ for (recorder_id in recorder_ids) {
       title = sprintf("identifications per species: %s", recorder_id),
       subtitle = sprintf("minimum confidence: %.3f", min_confidence),
       x = "species",
-      y = "number of identifications (log10 scale)"
+      y = expression("number of identifications (" * log[10] * " scale)")
     ) +
     ggplot2::theme_minimal(base_size = 12) +
     ggplot2::theme(
@@ -1630,7 +1630,7 @@ for (recorder_id in recorder_ids) {
       title = sprintf("identifications per species by month: %s", recorder_id),
       subtitle = sprintf("minimum confidence: %.3f", min_confidence),
       x = "species",
-      y = "number of identifications (log10 scale)"
+      y = expression("number of identifications (" * log[10] * " scale)")
     ) +
     ggplot2::theme_minimal(base_size = 12) +
     ggplot2::theme(

@@ -307,7 +307,7 @@ The analysis workflow writes:
 - `recorders/<RECORDER_ID>/...`  
   recorder-specific figures written for each recorder that currently has usable detections (for example `recorders/GEL_A/`)
 
-In the species-frequency plots, the identification axis is shown on a log10 scale, and common names are displayed in lowercase except where proper nouns remain capitalised. Latin names are italicised in the species-axis labels.
+In the species-frequency plots, the identification axis is shown on a log<sub>10</sub> scale, and common names are displayed in lowercase except where proper nouns remain capitalised. Latin names are italicised in the species-axis labels.
 The root-level analysis figures are the combined overall results across all recorders currently present in `out/`. Additional recorder-comparison figures are written as multi-panel plots, and recorder-specific figures are written into the `recorders/` subdirectory as each recorder becomes available.
 Monthly diversity metrics treat the number of detections per species as the abundance proxy for Shannon, Simpson, and Hill-number calculations, and are produced as overall combined figures, recorder-specific figures, and recorder-comparison figures.
 

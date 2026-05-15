@@ -294,17 +294,15 @@ For each recorder and each calendar month, the analysis script:
 
 where:
 
-- `n_i` = number of detections for species `i`
-- `N` = total number of detections across all species in that recorder-month
-- `p_i` = relative abundance of species `i`
+- <code><em>n<sub>i</sub></em></code> = number of detections for species <code><em>i</em></code>
+- <code><em>N</em></code> = total number of detections across all species in that recorder-month
+- <code><em>p<sub>i</sub></em></code> = relative abundance of species <code><em>i</em></code>
 
-The diversity metrics are then calculated as follows.
+The diversity metrics are then calculated as follows:
 
 #### Shannon diversity index
 
-```text
-H' = -Σ (p_i ln p_i)
-```
+<code><em>H<em><sup>'</sup> = -Σ(<em>p<sub>i</sub></em>log<sub><em>e</em></sub><em>p<sub>i</sub></em>)</code>
 
 #### Simpson diversity index
 

@@ -210,7 +210,7 @@ Archive streaming, extraction, and conversion stages are monitored through `proc
 
 BirdNET analysis is also run in a monitored child R process through `callr`, so TensorFlow/TFLite warnings should no longer make the main console progress appear frozen.
 
-## Resume behavior
+## Resume behaviour
 
 The archive script is restart-friendly.
 

@@ -302,36 +302,32 @@ The diversity metrics are then calculated as follows:
 
 #### Shannon diversity index
 
-<code><em>H<em><sup>'</sup> = -Σ(<em>p<sub>i</sub></em>log<sub><em>e</em></sub><em>p<sub>i</sub></em>)</code>
+<code><em>H</em><sup>'</sup> = -Σ(<em>p<sub>i</sub></em> log<sub><em>e</em></sub> <em>p<sub>i</sub></em>)</code>
 
 #### Simpson diversity index
 
 The script reports the Gini-Simpson form:
 
-```text
-1 - Σ (p_i^2)
-```
+<code>1 - Σ (<em>p<sub>i</sub></em><sup>2</sup>)</code>
 
-#### Hill number, q = 1
+#### Hill number, <em>q</em> = 1
 
 This is the exponential of Shannon diversity:
 
-```text
-^1D = exp(H')
-```
+<code><sup>1</sup><em>D</em> = <em>e</em><sup>H'</sup></code>
 
-#### Hill number, q = 2
+#### Hill number, <em>q</em> = 2
 
 This is the inverse Simpson concentration:
 
-```text
-^2D = 1 / Σ (p_i^2)
-```
+
+<code><sup>2</sup><em>D</em> = 1 / Σ <em>p<sub>i</sub></em><sup>2</sup>
+</code>
 
 Interpretation in this workflow:
 
-- larger Shannon and Hill `q = 1` values indicate greater effective diversity with sensitivity to both common and less-common species
-- larger Simpson and Hill `q = 2` values indicate greater diversity with stronger weighting toward the most frequently detected species
+- larger Shannon and Hill <em>q</em> = 1 indicate greater effective diversity with sensitivity to both common and less-common species
+- larger Simpson and Hill <em>q</em>  = 2 indicate greater diversity with stronger weighting toward the most frequently detected species
 - because the pipeline uses detections rather than direct counts of individuals, these are diversity estimates based on the assumption that detection frequency is a reasonable proxy for relative abundance
 
 ## Console progress during archive runs
@@ -353,7 +349,7 @@ When `Rscript scripts/process_tar_archive.R` is running, the console reports:
 
 Archive streaming, extraction, and conversion stages are monitored through `processx`, so they emit recurring heartbeat updates instead of staying silent until the subprocess returns.
 
-BirdNET analysis is also run in a monitored child R process through `callr`, so TensorFlow/TFLite warnings should no longer make the main console progress appear frozen.
+BirdNET analysis is also run in a monitored child R process through <code>callr</code>, so TensorFlow/TFLite warnings should no longer make the main console progress appear frozen.
 
 ## Resume behaviour
 

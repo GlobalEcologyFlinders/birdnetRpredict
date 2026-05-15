@@ -13,6 +13,7 @@ R-based <a href="https://birdnet.cornell.edu">BirdNET</a> workflow for:
 3. converting `.flac` to `.wav`
 4. filtering BirdNET predictions with a repository-local species list
 5. writing per-file prediction summaries and rolling progress reports
+6. post-processing existing summary CSVs into plots and aggregate tables
 
 ## Repository layout
 
@@ -25,6 +26,7 @@ birdnetRpredict/
 │       └── regional/
 │           └── lower_murray/
 └── scripts/
+    ├── analyse_birdnet_output.R
     ├── birdnet_helpers.R
     ├── birdnetID.R
     └── process_tar_archive.R
@@ -63,6 +65,22 @@ birdnetRpredict/
 
 This avoids unpacking the entire archive at once and avoids waiting for a full member enumeration before processing starts.
 macOS sidecar entries such as `._*.flac` and `__MACOSX/` metadata are skipped during archive streaming.
+
+### Post-processing analysis workflow
+
+`scripts/analyse_birdnet_output.R`:
+
+1. searches recursively under `out/` for existing `*_birdnet_species_summary.csv` files
+2. combines the summary CSVs that are already present and readable
+3. filters detections by a user-defined minimum confidence threshold
+4. bins detections into a user-defined time step (default `60` minutes)
+5. writes aggregate CSV tables plus plots for:
+   - identifications over time
+   - cumulative new species over time
+   - identifications per species
+   - temporal autocorrelation and spectral periodicity
+
+This script is intended to work while archive processing is still incomplete. You can rerun it at any time and it will analyse whatever summary CSVs currently exist in `out/`.
 
 ## How coordinates and date are determined
 
@@ -136,6 +154,20 @@ Edit:
 
 These control which archive is processed, which species filter is used, and how strict the prediction summaries are.
 
+### `scripts/analyse_birdnet_output.R`
+
+Edit the user-defined settings directly near the top of the script:
+
+- `summary_root`
+- `output_root`
+- `analysis_timezone`
+- `bin_minutes`
+- `min_confidence`
+- `periodicity_max_lag_bins`
+- `show_plots_in_session`
+
+These control which existing summary CSVs are included, where the analysis outputs are written, the temporal bin size used by the plots, and the minimum confidence required for a detection to be counted.
+
 ## How to run
 
 ### Single file
@@ -149,6 +181,15 @@ Rscript scripts/birdnetID.R
 ```bash
 Rscript scripts/process_tar_archive.R
 ```
+
+### Post-processing analysis
+
+Open `scripts/analyse_birdnet_output.R` in RStudio, VS Code, or another R editor, adjust the settings block if needed, then run the script inside R.
+
+The script is intended to be run as a standalone analysis file rather than driven by command-line arguments.
+
+It uses `ggplot2` for all figures.
+By default, the figures are shown in the active R graphics session and also saved as `.png` files.
 
 ## Outputs
 
@@ -188,6 +229,56 @@ The archive workflow writes:
   continually updated overall run summary, including progress, current file, current phase, elapsed time, ETA, and cumulative species count
 
 All archive outputs are written to the local repository drive, not back to the source archive drive.
+
+### Analysis outputs
+
+Post-processing outputs are written under:
+
+```text
+out/analysis/confidence_<threshold>_bin_<minutes>min/
+```
+
+The analysis workflow writes:
+
+- `birdnet_analysis_summary.txt`  
+  text summary of the current analysis run, including skipped or incomplete input files
+
+- `birdnet_analysis_input_files.csv`  
+  one row per discovered summary CSV, showing whether it was loaded successfully
+
+- `birdnet_analysis_filtered_detections.csv`  
+  all retained detections after applying the chosen minimum confidence threshold
+
+- `birdnet_identifications_by_time_bin.csv`  
+  identifications per time bin, plus unique species count per bin
+
+- `birdnet_cumulative_new_species_by_time_bin.csv`  
+  newly detected species per time bin and cumulative species richness through time
+
+- `birdnet_identifications_by_species.csv`  
+  species ranked from most frequently identified to least frequently identified
+
+- `birdnet_identifications_by_species_by_month.csv`  
+  species ranked by identification frequency within each month of the year
+
+- `birdnet_monthly_diversity_metrics.csv`  
+  monthly recorder-level diversity metrics calculated from detections-as-abundance, including Shannon index, Simpson index, and Hill numbers for q = 1 and q = 2
+
+- `birdnet_identification_acf.csv`  
+  autocorrelation values by temporal lag
+
+- `birdnet_identification_spectrum.csv`  
+  spectral-density summary for inspecting periodicity
+
+- `birdnet_identifications_over_time.png`
+- `birdnet_cumulative_new_species.png`
+- `birdnet_identifications_by_species.png`
+- `birdnet_identifications_by_species_by_month.png`
+- `birdnet_monthly_diversity_metrics.png`
+- `birdnet_periodicity.png`
+
+In the species-frequency plot, the identification axis is shown on a log10 scale, and common names are displayed in lowercase except where proper nouns remain capitalised.
+Monthly diversity metrics treat the number of detections per species as the abundance proxy for Shannon, Simpson, and Hill-number calculations, and are plotted as recorder-by-month time series.
 
 ## Console progress during archive runs
 

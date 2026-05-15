@@ -101,21 +101,14 @@ That file is combined with the BirdNET location/week range model to reduce false
 
 ## Requirements
 
-You need:
+- R packages: <code>birdnetR</code>, <code>processx</code>, <code>callr</code>
+- casks: <code>ffmpeg</code>, <code>tar</code> with <code>--zstd</code> support, <code>zstd</code>
 
-- R
-- the `birdnetR` package
-- the `processx` package
-- the `callr` package
-- `ffmpeg`
-- `tar` with `--zstd` support
-- `zstd`
-
-The current environment also expects BirdNET's Python dependencies to be installable through `birdnetR`.
+The current environment also expects BirdNET's Python dependencies to be installable through <a href="https://github.com/birdnet-team/birdnetR"><code>birdnetR</code></a>.
 
 ## User-defined settings
 
-The main user-editable settings are at the top of the scripts.
+Main user-editable settings are at the top of the scripts.
 
 ### `scripts/birdnetID.R`
 

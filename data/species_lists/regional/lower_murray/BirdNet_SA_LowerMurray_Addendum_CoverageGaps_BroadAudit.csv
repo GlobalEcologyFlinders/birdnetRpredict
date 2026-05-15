@@ -1,0 +1,9 @@
+ioc_species,expected_common,audit_note,present_in_birdnet_labels,birdnet_congeners,birdnet_same_commonname_scientific
+Platalea regia,Royal Spoonbill,Key wetland species; expected in SE Australia; absent from BirdNET labels,False,Platalea ajaja; Platalea leucorodia,
+Platalea flavipes,Yellow-billed Spoonbill,Key wetland species; expected in SE Australia; absent from BirdNET labels,False,Platalea ajaja; Platalea leucorodia,
+Threskiornis spinicollis,Straw-necked Ibis,"Common inland/SE wetland ibis; expected; absent from BirdNET labels (only T. molucca present as ""Australian Ibis"")",False,Threskiornis melanocephalus; Threskiornis molucca,
+Threskiornis molucca,Australian White Ibis,"Present in BirdNET labels (as ""Australian Ibis"")",True,,
+Nycticorax caledonicus,Nankeen Night Heron,Common wetland heron; expected; absent from BirdNET labels,False,Nycticorax nycticorax,
+Aythya australis,Hardhead,Common freshwater duck; expected; absent from BirdNET labels,False,Aythya affinis; Aythya americana; Aythya collaris; Aythya ferina; Aythya fuligula; Aythya marila; Aythya nyroca; Aythya valisineria,
+Spatula rhynchotis,Australasian Shoveler,Common duck; expected; absent from BirdNET labels,False,Spatula clypeata; Spatula cyanoptera; Spatula discors; Spatula platalea; Spatula puna; Spatula querquedula,
+Spatula clypeata,Northern Shoveler,Present in BirdNET labels (non-English common name in list),True,,

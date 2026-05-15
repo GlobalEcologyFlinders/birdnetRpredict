@@ -252,17 +252,32 @@ The analysis workflow writes:
 - `birdnet_identifications_by_time_bin.csv`  
   identifications per time bin, plus unique species count per bin
 
+- `birdnet_identifications_by_time_bin_by_recorder.csv`  
+  identifications per time bin for each recorder separately
+
 - `birdnet_cumulative_new_species_by_time_bin.csv`  
   newly detected species per time bin and cumulative species richness through time
+
+- `birdnet_cumulative_new_species_by_time_bin_by_recorder.csv`  
+  cumulative new-species summaries calculated separately for each recorder
 
 - `birdnet_identifications_by_species.csv`  
   species ranked from most frequently identified to least frequently identified
 
+- `birdnet_identifications_by_species_by_recorder.csv`  
+  species-frequency summaries calculated separately for each recorder
+
 - `birdnet_identifications_by_species_by_month.csv`  
   species ranked by identification frequency within each month of the year
 
+- `birdnet_identifications_by_species_by_month_by_recorder.csv`  
+  month-by-species summaries calculated separately for each recorder
+
 - `birdnet_monthly_diversity_metrics.csv`  
   monthly recorder-level diversity metrics calculated from detections-as-abundance, including Shannon index, Simpson index, and Hill numbers for <em>q</em> = 1 and <em>q</em> = 2
+
+- `birdnet_monthly_diversity_metrics_overall.csv`  
+  monthly diversity metrics after combining detections across all currently analysed recorders
 
 - `birdnet_identification_acf.csv`  
   autocorrelation values by temporal lag
@@ -270,15 +285,31 @@ The analysis workflow writes:
 - `birdnet_identification_spectrum.csv`  
   spectral-density summary for inspecting periodicity
 
+- `birdnet_identification_periodicity_by_recorder.csv`  
+  recorder-specific autocorrelation and spectral-periodicity values used by the recorder comparison figure
+
 - `birdnet_identifications_over_time.png`
 - `birdnet_cumulative_new_species.png`
 - `birdnet_identifications_by_species.png`
 - `birdnet_identifications_by_species_by_month.png`
 - `birdnet_monthly_diversity_metrics.png`
-- `birdnet_periodicity.png`
+- `birdnet_periodicity.png`  
+  overall figures combining all recorders currently present in the analysis
 
-In the species-frequency plot, the identification axis is shown on a log10 scale, and common names are displayed in lowercase except where proper nouns remain capitalised.
-Monthly diversity metrics treat the number of detections per species as the abundance proxy for Shannon, Simpson, and Hill-number calculations, and are plotted as recorder-by-month time series.
+- `birdnet_identifications_over_time_by_recorder.png`
+- `birdnet_cumulative_new_species_by_recorder.png`
+- `birdnet_identifications_by_species_by_recorder.png`
+- `birdnet_identifications_by_species_by_month_by_recorder.png`
+- `birdnet_monthly_diversity_metrics_by_recorder.png`
+- `birdnet_periodicity_by_recorder.png`  
+  multi-panel recorder-comparison figures
+
+- `recorders/<RECORDER_ID>/...`  
+  recorder-specific figures written for each recorder that currently has usable detections (for example `recorders/GEL_A/`)
+
+In the species-frequency plots, the identification axis is shown on a log10 scale, and common names are displayed in lowercase except where proper nouns remain capitalised. Latin names are italicised in the species-axis labels.
+The root-level analysis figures are the combined overall results across all recorders currently present in `out/`. Additional recorder-comparison figures are written as multi-panel plots, and recorder-specific figures are written into the `recorders/` subdirectory as each recorder becomes available.
+Monthly diversity metrics treat the number of detections per species as the abundance proxy for Shannon, Simpson, and Hill-number calculations, and are produced as overall combined figures, recorder-specific figures, and recorder-comparison figures.
 
 ### Diversity-metric calculations
 

@@ -200,6 +200,20 @@ normalise_common_name <- function(common_name) {
   normalised_name
 }
 
+escape_plotmath_text <- function(text_value) {
+  text_value <- gsub("\\\\", "\\\\\\\\", text_value)
+  gsub("\"", "\\\\\"", text_value)
+}
+
+build_species_label_plotmath <- function(common_name, scientific_name) {
+  paste0(
+    "\"", escape_plotmath_text(common_name), "\"",
+    "*\" (\"*",
+    "italic(\"", escape_plotmath_text(scientific_name), "\")",
+    "*\")\""
+  )
+}
+
 extract_recorder_id <- function(path_text) {
   path_parts <- strsplit(normalizePath(path_text, winslash = "/", mustWork = FALSE), "/", fixed = TRUE)[[1]]
   recorder_hits <- unique(path_parts[grepl("^GEL_[A-Z]+$", path_parts)])
@@ -274,6 +288,294 @@ build_monthly_diversity_summary <- function(filtered_detections, timezone) {
   ]
   monthly_diversity_summary$month_start <- as.Date(monthly_diversity_summary$month_start)
   monthly_diversity_summary
+}
+
+build_monthly_diversity_long <- function(monthly_diversity_summary) {
+  do.call(
+    rbind,
+    list(
+      data.frame(
+        recorder_id = monthly_diversity_summary$recorder_id,
+        month_start = monthly_diversity_summary$month_start,
+        month_label = monthly_diversity_summary$month_label,
+        metric_name = "Hill number (q = 1)",
+        metric_value = monthly_diversity_summary$hill_q1,
+        stringsAsFactors = FALSE
+      ),
+      data.frame(
+        recorder_id = monthly_diversity_summary$recorder_id,
+        month_start = monthly_diversity_summary$month_start,
+        month_label = monthly_diversity_summary$month_label,
+        metric_name = "Hill number (q = 2)",
+        metric_value = monthly_diversity_summary$hill_q2,
+        stringsAsFactors = FALSE
+      ),
+      data.frame(
+        recorder_id = monthly_diversity_summary$recorder_id,
+        month_start = monthly_diversity_summary$month_start,
+        month_label = monthly_diversity_summary$month_label,
+        metric_name = "Shannon index",
+        metric_value = monthly_diversity_summary$shannon_index,
+        stringsAsFactors = FALSE
+      ),
+      data.frame(
+        recorder_id = monthly_diversity_summary$recorder_id,
+        month_start = monthly_diversity_summary$month_start,
+        month_label = monthly_diversity_summary$month_label,
+        metric_name = "Simpson index",
+        metric_value = monthly_diversity_summary$simpson_index,
+        stringsAsFactors = FALSE
+      )
+    )
+  )
+}
+
+build_time_series_summary_for_subset <- function(detections_subset, bin_minutes, timezone) {
+  if (nrow(detections_subset) == 0) {
+    return(data.frame(
+      time_bin = as.POSIXct(character()),
+      identification_count = integer(),
+      unique_species_count = integer()
+    ))
+  }
+
+  detections_subset <- detections_subset[order(detections_subset$date_time, detections_subset$scientific_name), , drop = FALSE]
+  detections_subset$time_bin <- floor_to_bin(
+    detections_subset$date_time,
+    bin_minutes = bin_minutes,
+    timezone = timezone
+  )
+  subset_time_grid <- build_complete_time_grid(
+    start_time = min(detections_subset$date_time),
+    end_time = max(detections_subset$date_time),
+    bin_minutes = bin_minutes,
+    timezone = timezone
+  )
+
+  detections_by_bin <- aggregate(
+    list(identification_count = rep(1L, nrow(detections_subset))),
+    by = list(time_bin = detections_subset$time_bin),
+    FUN = sum
+  )
+  species_richness_by_bin <- aggregate(
+    list(unique_species_count = detections_subset$scientific_name),
+    by = list(time_bin = detections_subset$time_bin),
+    FUN = function(x) length(unique(x))
+  )
+
+  time_series_summary <- merge(
+    data.frame(time_bin = subset_time_grid),
+    detections_by_bin,
+    by = "time_bin",
+    all.x = TRUE
+  )
+  time_series_summary <- merge(
+    time_series_summary,
+    species_richness_by_bin,
+    by = "time_bin",
+    all.x = TRUE
+  )
+  time_series_summary$identification_count[is.na(time_series_summary$identification_count)] <- 0L
+  time_series_summary$unique_species_count[is.na(time_series_summary$unique_species_count)] <- 0L
+  time_series_summary[order(time_series_summary$time_bin), , drop = FALSE]
+}
+
+build_cumulative_new_species_for_subset <- function(detections_subset, bin_minutes, timezone) {
+  if (nrow(detections_subset) == 0) {
+    return(data.frame(
+      time_bin = as.POSIXct(character()),
+      new_species_count = integer(),
+      first_detected_species = character(),
+      cumulative_new_species = integer(),
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  detections_subset <- detections_subset[order(detections_subset$date_time, detections_subset$scientific_name), , drop = FALSE]
+  subset_time_grid <- build_complete_time_grid(
+    start_time = min(detections_subset$date_time),
+    end_time = max(detections_subset$date_time),
+    bin_minutes = bin_minutes,
+    timezone = timezone
+  )
+  first_detections <- detections_subset[!duplicated(detections_subset$scientific_name), , drop = FALSE]
+  first_detections$first_detection_bin <- floor_to_bin(
+    first_detections$date_time,
+    bin_minutes = bin_minutes,
+    timezone = timezone
+  )
+
+  new_species_by_bin <- aggregate(
+    list(new_species_count = rep(1L, nrow(first_detections))),
+    by = list(time_bin = first_detections$first_detection_bin),
+    FUN = sum
+  )
+  species_first_detected <- aggregate(
+    list(first_detected_species = first_detections$common_name),
+    by = list(time_bin = first_detections$first_detection_bin),
+    FUN = function(x) paste(unique(x), collapse = "; ")
+  )
+
+  cumulative_new_species <- merge(
+    data.frame(time_bin = subset_time_grid),
+    new_species_by_bin,
+    by = "time_bin",
+    all.x = TRUE
+  )
+  cumulative_new_species <- merge(
+    cumulative_new_species,
+    species_first_detected,
+    by = "time_bin",
+    all.x = TRUE
+  )
+  cumulative_new_species$new_species_count[is.na(cumulative_new_species$new_species_count)] <- 0L
+  cumulative_new_species$first_detected_species[is.na(cumulative_new_species$first_detected_species)] <- ""
+  cumulative_new_species$cumulative_new_species <- cumsum(cumulative_new_species$new_species_count)
+  cumulative_new_species
+}
+
+build_species_counts_for_subset <- function(detections_subset,
+                                            species_levels = NULL,
+                                            species_lookup = NULL,
+                                            zero_fill = FALSE) {
+  if (nrow(detections_subset) == 0 && !zero_fill) {
+    return(data.frame(
+      scientific_name = character(),
+      common_name = character(),
+      identification_count = integer(),
+      species_label = character(),
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  species_counts <- aggregate(
+    list(identification_count = rep(1L, nrow(detections_subset))),
+    by = list(
+      scientific_name = detections_subset$scientific_name,
+      common_name = detections_subset$common_name
+    ),
+    FUN = sum
+  )
+  species_counts$species_label <- paste0(species_counts$common_name, " (", species_counts$scientific_name, ")")
+
+  if (zero_fill) {
+    species_lookup_subset <- species_lookup[, c("scientific_name", "common_name", "species_label"), drop = FALSE]
+    species_lookup_subset$species_label <- as.character(species_lookup_subset$species_label)
+    species_counts <- merge(
+      species_lookup_subset,
+      species_counts[, c("species_label", "identification_count"), drop = FALSE],
+      by = "species_label",
+      all.x = TRUE
+    )
+    species_counts$identification_count[is.na(species_counts$identification_count)] <- 0L
+  }
+
+  species_counts <- species_counts[order(-species_counts$identification_count, species_counts$species_label), , drop = FALSE]
+
+  if (!is.null(species_levels)) {
+    species_counts$species_label <- factor(as.character(species_counts$species_label), levels = species_levels)
+  }
+
+  species_counts
+}
+
+build_species_counts_by_month_for_subset <- function(detections_subset,
+                                                     species_lookup,
+                                                     species_levels,
+                                                     observed_months) {
+  species_counts_by_month <- aggregate(
+    list(identification_count = rep(1L, nrow(detections_subset))),
+    by = list(
+      month_num = detections_subset$month_num,
+      month_label = detections_subset$month_label,
+      scientific_name = detections_subset$scientific_name,
+      common_name = detections_subset$common_name
+    ),
+    FUN = sum
+  )
+  species_counts_by_month$species_label <- paste0(
+    species_counts_by_month$common_name,
+    " (",
+    species_counts_by_month$scientific_name,
+    ")"
+  )
+
+  species_lookup_subset <- species_lookup[, c("scientific_name", "common_name", "species_label"), drop = FALSE]
+  species_lookup_subset$species_label <- as.character(species_lookup_subset$species_label)
+
+  month_species_grid <- merge(
+    observed_months,
+    species_lookup_subset,
+    by = NULL
+  )
+
+  species_counts_by_month <- merge(
+    month_species_grid,
+    species_counts_by_month[, c("month_num", "species_label", "identification_count"), drop = FALSE],
+    by = c("month_num", "species_label"),
+    all.x = TRUE
+  )
+  species_counts_by_month$identification_count[is.na(species_counts_by_month$identification_count)] <- 0L
+  species_counts_by_month$month_label <- factor(species_counts_by_month$month_label, levels = month.abb)
+  species_counts_by_month$species_label <- factor(as.character(species_counts_by_month$species_label), levels = species_levels)
+  species_counts_by_month$overall_species_order <- match(as.character(species_counts_by_month$species_label), species_levels)
+  species_counts_by_month <- species_counts_by_month[
+    order(species_counts_by_month$month_num, species_counts_by_month$overall_species_order),
+    ,
+    drop = FALSE
+  ]
+  species_counts_by_month$identification_count_plot <- ifelse(
+    species_counts_by_month$identification_count > 0,
+    species_counts_by_month$identification_count,
+    NA_real_
+  )
+  species_counts_by_month
+}
+
+build_periodicity_frames <- function(time_series_summary, bin_minutes, periodicity_max_lag_bins) {
+  bin_counts <- time_series_summary$identification_count
+  periodicity_frames <- list()
+
+  if (length(bin_counts) >= 2 && length(unique(bin_counts)) > 1) {
+    acf_result <- stats::acf(
+      bin_counts,
+      plot = FALSE,
+      lag.max = min(periodicity_max_lag_bins, length(bin_counts) - 1L),
+      na.action = stats::na.pass
+    )
+
+    periodicity_frames[[length(periodicity_frames) + 1L]] <- data.frame(
+      panel = "autocorrelation",
+      x_value = as.numeric(acf_result$lag[, , 1]) * (bin_minutes / 60),
+      y_value = as.numeric(acf_result$acf[, , 1]),
+      stringsAsFactors = FALSE
+    )
+  }
+
+  if (length(bin_counts) >= 4 && sum((bin_counts - mean(bin_counts))^2) > 0) {
+    spectrum_result <- stats::spec.pgram(
+      bin_counts,
+      taper = 0,
+      demean = TRUE,
+      detrend = FALSE,
+      plot = FALSE,
+      fast = FALSE
+    )
+    positive_frequency <- spectrum_result$freq > 0
+
+    periodicity_frames[[length(periodicity_frames) + 1L]] <- data.frame(
+      panel = "spectral density",
+      x_value = (bin_minutes / 60) / spectrum_result$freq[positive_frequency],
+      y_value = spectrum_result$spec[positive_frequency],
+      stringsAsFactors = FALSE
+    )
+  }
+
+  if (length(periodicity_frames) == 0) {
+    return(data.frame(panel = character(), x_value = numeric(), y_value = numeric(), stringsAsFactors = FALSE))
+  }
+
+  do.call(rbind, periodicity_frames)
 }
 
 write_analysis_summary <- function(summary_txt,
@@ -540,9 +842,22 @@ species_counts <- aggregate(
 )
 species_counts <- species_counts[species_counts$identification_count >= 1, , drop = FALSE]
 species_counts$species_label <- paste0(species_counts$common_name, " (", species_counts$scientific_name, ")")
+species_counts$species_label_plotmath <- vapply(
+  seq_len(nrow(species_counts)),
+  function(index) {
+    build_species_label_plotmath(
+      species_counts$common_name[[index]],
+      species_counts$scientific_name[[index]]
+    )
+  },
+  character(1)
+)
 species_counts <- species_counts[order(-species_counts$identification_count, species_counts$species_label), , drop = FALSE]
 species_counts$species_label <- factor(species_counts$species_label, levels = rev(species_counts$species_label))
 global_species_levels <- levels(species_counts$species_label)
+species_label_plotmath_lookup <- setNames(species_counts$species_label_plotmath, species_counts$species_label)
+observed_months <- unique(filtered_detections[, c("month_num", "month_label")])
+observed_months <- observed_months[order(observed_months$month_num), , drop = FALSE]
 
 species_counts_by_month <- aggregate(
   list(identification_count = rep(1L, nrow(filtered_detections))),
@@ -569,6 +884,29 @@ species_counts_by_month$overall_species_order <- match(
   as.character(species_counts_by_month$species_label),
   global_species_levels
 )
+species_lookup <- species_counts[, c("scientific_name", "common_name", "species_label")]
+species_lookup$species_label <- as.character(species_lookup$species_label)
+month_species_grid <- merge(
+  observed_months,
+  species_lookup,
+  by = NULL
+)
+species_counts_by_month <- merge(
+  month_species_grid,
+  species_counts_by_month[, c("month_num", "species_label", "identification_count", "overall_species_order")],
+  by = c("month_num", "species_label"),
+  all.x = TRUE
+)
+species_counts_by_month$identification_count[is.na(species_counts_by_month$identification_count)] <- 0
+species_counts_by_month$month_label <- factor(species_counts_by_month$month_label, levels = month.abb)
+species_counts_by_month$species_label <- factor(
+  species_counts_by_month$species_label,
+  levels = global_species_levels
+)
+species_counts_by_month$overall_species_order <- match(
+  as.character(species_counts_by_month$species_label),
+  global_species_levels
+)
 species_counts_by_month <- species_counts_by_month[
   order(
     species_counts_by_month$month_num,
@@ -577,59 +915,134 @@ species_counts_by_month <- species_counts_by_month[
   ,
   drop = FALSE
 ]
-first_month_with_detections <- as.character(month.abb[min(species_counts_by_month$month_num, na.rm = TRUE)])
-species_counts_by_month$month_species_label <- paste(
-  species_counts_by_month$month_label,
-  as.character(species_counts_by_month$species_label),
-  sep = "___"
+species_counts_by_month$identification_count_plot <- ifelse(
+  species_counts_by_month$identification_count > 0,
+  species_counts_by_month$identification_count,
+  NA_real_
 )
-species_counts_by_month$month_species_label <- factor(
-  species_counts_by_month$month_species_label,
-  levels = species_counts_by_month$month_species_label
-)
+species_counts_by_month_positive <- species_counts_by_month[
+  !is.na(species_counts_by_month$identification_count_plot),
+  ,
+  drop = FALSE
+]
 
 monthly_diversity_summary <- build_monthly_diversity_summary(filtered_detections, analysis_timezone)
-monthly_diversity_long <- do.call(
-  rbind,
-  list(
-    data.frame(
-      recorder_id = monthly_diversity_summary$recorder_id,
-      month_start = monthly_diversity_summary$month_start,
-      month_label = monthly_diversity_summary$month_label,
-      metric_name = "Hill number (q = 1)",
-      metric_value = monthly_diversity_summary$hill_q1,
-      stringsAsFactors = FALSE
-    ),
-    data.frame(
-      recorder_id = monthly_diversity_summary$recorder_id,
-      month_start = monthly_diversity_summary$month_start,
-      month_label = monthly_diversity_summary$month_label,
-      metric_name = "Hill number (q = 2)",
-      metric_value = monthly_diversity_summary$hill_q2,
-      stringsAsFactors = FALSE
-    ),
-    data.frame(
-      recorder_id = monthly_diversity_summary$recorder_id,
-      month_start = monthly_diversity_summary$month_start,
-      month_label = monthly_diversity_summary$month_label,
-      metric_name = "Shannon index",
-      metric_value = monthly_diversity_summary$shannon_index,
-      stringsAsFactors = FALSE
-    ),
-    data.frame(
-      recorder_id = monthly_diversity_summary$recorder_id,
-      month_start = monthly_diversity_summary$month_start,
-      month_label = monthly_diversity_summary$month_label,
-      metric_name = "Simpson index",
-      metric_value = monthly_diversity_summary$simpson_index,
-      stringsAsFactors = FALSE
-    )
-  )
-)
+monthly_diversity_long <- build_monthly_diversity_long(monthly_diversity_summary)
 monthly_diversity_long$metric_name <- factor(
   monthly_diversity_long$metric_name,
   levels = c("Hill number (q = 1)", "Hill number (q = 2)", "Shannon index", "Simpson index")
 )
+
+overall_monthly_diversity_summary <- build_monthly_diversity_summary(
+  transform(filtered_detections, recorder_id = "ALL_RECORDERS"),
+  analysis_timezone
+)
+overall_monthly_diversity_long <- build_monthly_diversity_long(overall_monthly_diversity_summary)
+overall_monthly_diversity_long$metric_name <- factor(
+  overall_monthly_diversity_long$metric_name,
+  levels = levels(monthly_diversity_long$metric_name)
+)
+
+recorder_ids <- sort(unique(filtered_detections$recorder_id))
+recorder_output_root <- file.path(output_dir, "recorders")
+dir.create(recorder_output_root, recursive = TRUE, showWarnings = FALSE)
+
+time_series_by_recorder <- do.call(
+  rbind,
+  lapply(recorder_ids, function(recorder_id) {
+    subset_detections <- filtered_detections[filtered_detections$recorder_id == recorder_id, , drop = FALSE]
+    subset_time_series <- build_time_series_summary_for_subset(subset_detections, bin_minutes, analysis_timezone)
+    subset_time_series$recorder_id <- recorder_id
+    subset_time_series
+  })
+)
+
+cumulative_new_species_by_recorder <- do.call(
+  rbind,
+  lapply(recorder_ids, function(recorder_id) {
+    subset_detections <- filtered_detections[filtered_detections$recorder_id == recorder_id, , drop = FALSE]
+    subset_cumulative <- build_cumulative_new_species_for_subset(subset_detections, bin_minutes, analysis_timezone)
+    subset_cumulative$recorder_id <- recorder_id
+    subset_cumulative
+  })
+)
+
+species_counts_by_recorder <- do.call(
+  rbind,
+  lapply(recorder_ids, function(recorder_id) {
+    subset_detections <- filtered_detections[filtered_detections$recorder_id == recorder_id, , drop = FALSE]
+    subset_species_counts <- build_species_counts_for_subset(
+      subset_detections,
+      species_levels = global_species_levels,
+      species_lookup = species_counts,
+      zero_fill = TRUE
+    )
+    subset_species_counts$recorder_id <- recorder_id
+    subset_species_counts$identification_count_plot <- ifelse(
+      subset_species_counts$identification_count > 0,
+      subset_species_counts$identification_count,
+      NA_real_
+    )
+    subset_species_counts
+  })
+)
+species_counts_by_recorder_positive <- species_counts_by_recorder[
+  !is.na(species_counts_by_recorder$identification_count_plot),
+  ,
+  drop = FALSE
+]
+
+species_counts_by_month_by_recorder <- do.call(
+  rbind,
+  lapply(recorder_ids, function(recorder_id) {
+    subset_detections <- filtered_detections[filtered_detections$recorder_id == recorder_id, , drop = FALSE]
+    subset_observed_months <- unique(subset_detections[, c("month_num", "month_label")])
+    subset_observed_months <- subset_observed_months[order(subset_observed_months$month_num), , drop = FALSE]
+    subset_species_lookup <- species_counts_by_recorder_positive[
+      species_counts_by_recorder_positive$recorder_id == recorder_id,
+      c("scientific_name", "common_name", "species_label"),
+      drop = FALSE
+    ]
+    subset_species_levels <- global_species_levels[global_species_levels %in% as.character(subset_species_lookup$species_label)]
+    subset_species_lookup$species_label <- as.character(subset_species_lookup$species_label)
+
+    subset_monthly_counts <- build_species_counts_by_month_for_subset(
+      subset_detections,
+      species_lookup = subset_species_lookup,
+      species_levels = subset_species_levels,
+      observed_months = subset_observed_months
+    )
+    subset_monthly_counts$recorder_id <- recorder_id
+    subset_monthly_counts
+  })
+)
+species_counts_by_month_by_recorder_positive <- species_counts_by_month_by_recorder[
+  !is.na(species_counts_by_month_by_recorder$identification_count_plot),
+  ,
+  drop = FALSE
+]
+
+periodicity_by_recorder <- do.call(
+  rbind,
+  lapply(recorder_ids, function(recorder_id) {
+    subset_time_series <- time_series_by_recorder[time_series_by_recorder$recorder_id == recorder_id, , drop = FALSE]
+    subset_periodicity <- build_periodicity_frames(subset_time_series, bin_minutes, periodicity_max_lag_bins)
+    if (nrow(subset_periodicity) == 0) {
+      return(NULL)
+    }
+    subset_periodicity$recorder_id <- recorder_id
+    subset_periodicity
+  })
+)
+if (is.null(periodicity_by_recorder)) {
+  periodicity_by_recorder <- data.frame(
+    panel = character(),
+    x_value = numeric(),
+    y_value = numeric(),
+    recorder_id = character(),
+    stringsAsFactors = FALSE
+  )
+}
 
 bin_counts <- time_series_summary$identification_count
 acf_table <- data.frame(lag_bin = numeric(), lag_hours = numeric(), autocorrelation = numeric())
@@ -674,22 +1087,34 @@ analysis_summary_txt <- file.path(output_dir, "birdnet_analysis_summary.txt")
 input_files_csv <- file.path(output_dir, "birdnet_analysis_input_files.csv")
 filtered_detections_csv <- file.path(output_dir, "birdnet_analysis_filtered_detections.csv")
 time_series_csv <- file.path(output_dir, "birdnet_identifications_by_time_bin.csv")
+time_series_by_recorder_csv <- file.path(output_dir, "birdnet_identifications_by_time_bin_by_recorder.csv")
 cumulative_species_csv <- file.path(output_dir, "birdnet_cumulative_new_species_by_time_bin.csv")
+cumulative_species_by_recorder_csv <- file.path(output_dir, "birdnet_cumulative_new_species_by_time_bin_by_recorder.csv")
 species_counts_csv <- file.path(output_dir, "birdnet_identifications_by_species.csv")
+species_counts_by_recorder_csv <- file.path(output_dir, "birdnet_identifications_by_species_by_recorder.csv")
 species_counts_by_month_csv <- file.path(output_dir, "birdnet_identifications_by_species_by_month.csv")
+species_counts_by_month_by_recorder_csv <- file.path(output_dir, "birdnet_identifications_by_species_by_month_by_recorder.csv")
 monthly_diversity_csv <- file.path(output_dir, "birdnet_monthly_diversity_metrics.csv")
+overall_monthly_diversity_csv <- file.path(output_dir, "birdnet_monthly_diversity_metrics_overall.csv")
 acf_csv <- file.path(output_dir, "birdnet_identification_acf.csv")
 spectrum_csv <- file.path(output_dir, "birdnet_identification_spectrum.csv")
+periodicity_by_recorder_csv <- file.path(output_dir, "birdnet_identification_periodicity_by_recorder.csv")
 
 write.csv(file_status, input_files_csv, row.names = FALSE)
 write.csv(filtered_detections, filtered_detections_csv, row.names = FALSE)
 write.csv(time_series_summary, time_series_csv, row.names = FALSE)
+write.csv(time_series_by_recorder, time_series_by_recorder_csv, row.names = FALSE)
 write.csv(cumulative_new_species, cumulative_species_csv, row.names = FALSE)
+write.csv(cumulative_new_species_by_recorder, cumulative_species_by_recorder_csv, row.names = FALSE)
 write.csv(species_counts, species_counts_csv, row.names = FALSE)
+write.csv(species_counts_by_recorder, species_counts_by_recorder_csv, row.names = FALSE)
 write.csv(species_counts_by_month, species_counts_by_month_csv, row.names = FALSE)
+write.csv(species_counts_by_month_by_recorder, species_counts_by_month_by_recorder_csv, row.names = FALSE)
 write.csv(monthly_diversity_summary, monthly_diversity_csv, row.names = FALSE)
+write.csv(overall_monthly_diversity_summary, overall_monthly_diversity_csv, row.names = FALSE)
 write.csv(acf_table, acf_csv, row.names = FALSE)
 write.csv(spectrum_table, spectrum_csv, row.names = FALSE)
+write.csv(periodicity_by_recorder, periodicity_by_recorder_csv, row.names = FALSE)
 
 generated_at <- Sys.time()
 write_analysis_summary(
@@ -741,6 +1166,11 @@ species_counts_plot <- ggplot2::ggplot(
 ) +
   ggplot2::geom_col(fill = "tan3") +
   ggplot2::coord_flip() +
+  ggplot2::scale_x_discrete(
+    labels = function(x) {
+      parse(text = unname(species_label_plotmath_lookup[as.character(x)]))
+    }
+  ) +
   ggplot2::scale_y_log10() +
   ggplot2::labs(
     title = "identifications per species",
@@ -752,22 +1182,24 @@ species_counts_plot <- ggplot2::ggplot(
   ggplot2::theme(
     plot.title = ggplot2::element_text(face = "bold"),
     plot.subtitle = ggplot2::element_text(size = 11),
+    axis.text.y = ggplot2::element_text(size = 8.4),
     panel.grid.minor = ggplot2::element_blank()
   )
 
 species_counts_by_month_plot <- ggplot2::ggplot(
   species_counts_by_month,
-  ggplot2::aes(x = month_species_label, y = identification_count)
+  ggplot2::aes(x = species_label, y = identification_count_plot)
 ) +
-  ggplot2::geom_col(fill = "tan3") +
+  ggplot2::geom_col(
+    data = species_counts_by_month_positive,
+    fill = "tan3"
+  ) +
   ggplot2::coord_flip() +
-  ggplot2::facet_wrap(~month_label, scales = "free_y") +
+  ggplot2::facet_grid(. ~ month_label) +
   ggplot2::scale_x_discrete(
-    drop = TRUE,
+    drop = FALSE,
     labels = function(x) {
-      month_prefix <- sub("___.*$", "", x)
-      species_text <- sub("^[^_]+___", "", x)
-      ifelse(month_prefix == first_month_with_detections, species_text, "")
+      parse(text = unname(species_label_plotmath_lookup[as.character(x)]))
     }
   ) +
   ggplot2::scale_y_log10() +
@@ -781,22 +1213,128 @@ species_counts_by_month_plot <- ggplot2::ggplot(
   ggplot2::theme(
     plot.title = ggplot2::element_text(face = "bold"),
     plot.subtitle = ggplot2::element_text(size = 11),
+    axis.text.y = ggplot2::element_text(size = 8.4),
     panel.grid.minor = ggplot2::element_blank()
   )
 
 monthly_diversity_plot <- ggplot2::ggplot(
-  monthly_diversity_long,
-  ggplot2::aes(x = month_start, y = metric_value, colour = recorder_id, group = recorder_id)
+  overall_monthly_diversity_long,
+  ggplot2::aes(x = month_start, y = metric_value, group = recorder_id)
 ) +
-  ggplot2::geom_line(linewidth = 0.9) +
+  ggplot2::geom_line(linewidth = 0.9, colour = "steelblue4") +
   ggplot2::geom_point(size = 2) +
   ggplot2::facet_wrap(~metric_name, scales = "free_y", ncol = 2) +
+  ggplot2::labs(
+    title = "monthly diversity metrics across all recorders",
+    subtitle = "detections treated as relative abundance for Shannon, Simpson, and Hill numbers",
+    x = "month",
+    y = "metric value"
+  ) +
+  ggplot2::scale_x_date(date_labels = "%Y-%m") +
+  analysis_plot_theme()
+
+time_series_by_recorder_plot <- ggplot2::ggplot(
+  time_series_by_recorder,
+  ggplot2::aes(x = time_bin, y = identification_count)
+) +
+  ggplot2::geom_col(fill = "steelblue", width = bin_minutes * 60 * 0.9) +
+  ggplot2::facet_grid(recorder_id ~ ., scales = "free_y") +
+  ggplot2::labs(
+    title = "BirdNET identifications over time by recorder",
+    subtitle = plot_subtitle,
+    x = "time bin",
+    y = "identifications per bin"
+  ) +
+  analysis_plot_theme()
+
+cumulative_species_by_recorder_plot <- ggplot2::ggplot(
+  cumulative_new_species_by_recorder,
+  ggplot2::aes(x = time_bin, y = cumulative_new_species)
+) +
+  ggplot2::geom_step(linewidth = 1.1, colour = "darkgreen") +
+  ggplot2::facet_grid(recorder_id ~ ., scales = "free_y") +
+  ggplot2::labs(
+    title = "cumulative new species detected over time by recorder",
+    subtitle = plot_subtitle,
+    x = "time bin",
+    y = "cumulative number of new species"
+  ) +
+  analysis_plot_theme()
+
+species_counts_by_recorder_plot <- ggplot2::ggplot(
+  species_counts_by_recorder,
+  ggplot2::aes(x = species_label, y = identification_count_plot)
+) +
+  ggplot2::geom_col(
+    data = species_counts_by_recorder_positive,
+    fill = "tan3"
+  ) +
+  ggplot2::coord_flip() +
+  ggplot2::facet_grid(recorder_id ~ ., scales = "free_y", space = "free_y") +
+  ggplot2::scale_x_discrete(
+    drop = FALSE,
+    labels = function(x) {
+      parse(text = unname(species_label_plotmath_lookup[as.character(x)]))
+    }
+  ) +
+  ggplot2::scale_y_log10() +
+  ggplot2::labs(
+    title = "identifications per species by recorder",
+    subtitle = sprintf("minimum confidence: %.3f", min_confidence),
+    x = "species",
+    y = "number of identifications (log10 scale)"
+  ) +
+  ggplot2::theme_minimal(base_size = 12) +
+  ggplot2::theme(
+    plot.title = ggplot2::element_text(face = "bold"),
+    plot.subtitle = ggplot2::element_text(size = 11),
+    axis.text.y = ggplot2::element_text(size = 8.4),
+    panel.grid.minor = ggplot2::element_blank()
+  )
+
+species_counts_by_month_by_recorder_plot <- ggplot2::ggplot(
+  species_counts_by_month_by_recorder,
+  ggplot2::aes(x = species_label, y = identification_count_plot)
+) +
+  ggplot2::geom_col(
+    data = species_counts_by_month_by_recorder_positive,
+    fill = "tan3"
+  ) +
+  ggplot2::coord_flip() +
+  ggplot2::facet_grid(recorder_id ~ month_label) +
+  ggplot2::scale_x_discrete(
+    drop = FALSE,
+    labels = function(x) {
+      parse(text = unname(species_label_plotmath_lookup[as.character(x)]))
+    }
+  ) +
+  ggplot2::scale_y_log10() +
+  ggplot2::labs(
+    title = "identifications per species by recorder and month",
+    subtitle = sprintf("minimum confidence: %.3f", min_confidence),
+    x = "species",
+    y = "number of identifications (log10 scale)"
+  ) +
+  ggplot2::theme_minimal(base_size = 12) +
+  ggplot2::theme(
+    plot.title = ggplot2::element_text(face = "bold"),
+    plot.subtitle = ggplot2::element_text(size = 11),
+    axis.text.y = ggplot2::element_text(size = 8.4),
+    panel.grid.minor = ggplot2::element_blank()
+  )
+
+monthly_diversity_by_recorder_plot <- ggplot2::ggplot(
+  monthly_diversity_long,
+  ggplot2::aes(x = month_start, y = metric_value, group = 1)
+) +
+  ggplot2::geom_line(linewidth = 0.9, colour = "steelblue4") +
+  ggplot2::geom_point(size = 1.8, colour = "steelblue4") +
+  ggplot2::facet_grid(recorder_id ~ metric_name, scales = "free_y") +
   ggplot2::labs(
     title = "monthly diversity metrics by recorder",
     subtitle = "detections treated as relative abundance for Shannon, Simpson, and Hill numbers",
     x = "month",
-    y = "metric value",
-    colour = "recorder"
+    y = "metric value"
   ) +
   ggplot2::scale_x_date(date_labels = "%Y-%m") +
   analysis_plot_theme()
@@ -855,13 +1393,52 @@ if (length(periodicity_frames) > 0) {
   )
 }
 
+if (nrow(periodicity_by_recorder) > 0) {
+  periodicity_by_recorder_plot <- ggplot2::ggplot(
+    periodicity_by_recorder,
+    ggplot2::aes(x = x_value, y = y_value)
+  ) +
+    ggplot2::geom_line(linewidth = 0.9, colour = "firebrick3") +
+    ggplot2::facet_grid(recorder_id ~ panel, scales = "free") +
+    ggplot2::labs(
+      title = "temporal periodicity of identification rates by recorder",
+      subtitle = plot_subtitle,
+      x = "lag / period (hours)",
+      y = "metric value"
+    ) +
+    analysis_plot_theme()
+
+  if (any(periodicity_by_recorder$panel == "autocorrelation")) {
+    periodicity_by_recorder_plot <- periodicity_by_recorder_plot +
+      ggplot2::geom_hline(
+        data = unique(periodicity_by_recorder[periodicity_by_recorder$panel == "autocorrelation", "recorder_id", drop = FALSE]),
+        ggplot2::aes(yintercept = 0),
+        inherit.aes = FALSE,
+        linetype = "dashed",
+        colour = "grey40"
+      )
+  }
+} else {
+  periodicity_by_recorder_plot <- make_placeholder_plot(
+    title_text = "temporal periodicity of identification rates by recorder",
+    subtitle_text = plot_subtitle,
+    body_text = "not enough variation or time bins are currently available\nfor recorder-specific autocorrelation or spectral analysis."
+  )
+}
+
 if (isTRUE(show_plots_in_session)) {
   print(time_series_plot)
   print(cumulative_species_plot)
   print(species_counts_plot)
   print(species_counts_by_month_plot)
   print(monthly_diversity_plot)
+  print(time_series_by_recorder_plot)
+  print(cumulative_species_by_recorder_plot)
+  print(species_counts_by_recorder_plot)
+  print(species_counts_by_month_by_recorder_plot)
+  print(monthly_diversity_by_recorder_plot)
   print(periodicity_plot)
+  print(periodicity_by_recorder_plot)
 }
 
 ggplot2::ggsave(
@@ -900,11 +1477,224 @@ ggplot2::ggsave(
   dpi = 150
 )
 ggplot2::ggsave(
+  filename = file.path(output_dir, "birdnet_identifications_over_time_by_recorder.png"),
+  plot = time_series_by_recorder_plot,
+  width = 14,
+  height = max(7, 3 * length(recorder_ids)),
+  dpi = 150
+)
+ggplot2::ggsave(
+  filename = file.path(output_dir, "birdnet_cumulative_new_species_by_recorder.png"),
+  plot = cumulative_species_by_recorder_plot,
+  width = 14,
+  height = max(7, 3 * length(recorder_ids)),
+  dpi = 150
+)
+ggplot2::ggsave(
+  filename = file.path(output_dir, "birdnet_identifications_by_species_by_recorder.png"),
+  plot = species_counts_by_recorder_plot,
+  width = 14,
+  height = max(10, 3 * length(recorder_ids)),
+  dpi = 150
+)
+ggplot2::ggsave(
+  filename = file.path(output_dir, "birdnet_identifications_by_species_by_month_by_recorder.png"),
+  plot = species_counts_by_month_by_recorder_plot,
+  width = max(16, 3 * length(unique(species_counts_by_month_by_recorder$month_label))),
+  height = max(12, 3 * length(recorder_ids)),
+  dpi = 150
+)
+ggplot2::ggsave(
+  filename = file.path(output_dir, "birdnet_monthly_diversity_metrics_by_recorder.png"),
+  plot = monthly_diversity_by_recorder_plot,
+  width = 16,
+  height = max(8, 2.8 * length(recorder_ids)),
+  dpi = 150
+)
+ggplot2::ggsave(
   filename = file.path(output_dir, "birdnet_periodicity.png"),
   plot = periodicity_plot,
   width = 12,
   height = 9,
   dpi = 150
 )
+ggplot2::ggsave(
+  filename = file.path(output_dir, "birdnet_periodicity_by_recorder.png"),
+  plot = periodicity_by_recorder_plot,
+  width = 14,
+  height = max(8, 3 * length(recorder_ids)),
+  dpi = 150
+)
+
+for (recorder_id in recorder_ids) {
+  recorder_dir <- file.path(recorder_output_root, recorder_id)
+  dir.create(recorder_dir, recursive = TRUE, showWarnings = FALSE)
+
+  recorder_time_series <- time_series_by_recorder[time_series_by_recorder$recorder_id == recorder_id, , drop = FALSE]
+  recorder_cumulative <- cumulative_new_species_by_recorder[
+    cumulative_new_species_by_recorder$recorder_id == recorder_id,
+    ,
+    drop = FALSE
+  ]
+  recorder_species_counts <- species_counts_by_recorder_positive[
+    species_counts_by_recorder_positive$recorder_id == recorder_id,
+    ,
+    drop = FALSE
+  ]
+  recorder_species_levels <- global_species_levels[global_species_levels %in% as.character(recorder_species_counts$species_label)]
+  recorder_species_lookup <- species_label_plotmath_lookup[recorder_species_levels]
+  recorder_species_counts$species_label <- factor(as.character(recorder_species_counts$species_label), levels = recorder_species_levels)
+
+  recorder_species_by_month <- species_counts_by_month_by_recorder[
+    species_counts_by_month_by_recorder$recorder_id == recorder_id,
+    ,
+    drop = FALSE
+  ]
+  recorder_species_by_month_positive <- recorder_species_by_month[!is.na(recorder_species_by_month$identification_count_plot), , drop = FALSE]
+  recorder_species_by_month$species_label <- factor(as.character(recorder_species_by_month$species_label), levels = recorder_species_levels)
+  recorder_species_by_month_positive$species_label <- factor(as.character(recorder_species_by_month_positive$species_label), levels = recorder_species_levels)
+
+  recorder_diversity_long <- monthly_diversity_long[monthly_diversity_long$recorder_id == recorder_id, , drop = FALSE]
+  recorder_periodicity <- periodicity_by_recorder[periodicity_by_recorder$recorder_id == recorder_id, , drop = FALSE]
+
+  recorder_time_series_plot <- ggplot2::ggplot(
+    recorder_time_series,
+    ggplot2::aes(x = time_bin, y = identification_count)
+  ) +
+    ggplot2::geom_col(fill = "steelblue", width = bin_minutes * 60 * 0.9) +
+    ggplot2::labs(
+      title = sprintf("BirdNET identifications over time: %s", recorder_id),
+      subtitle = plot_subtitle,
+      x = "time bin",
+      y = "identifications per bin"
+    ) +
+    analysis_plot_theme()
+
+  recorder_cumulative_plot <- ggplot2::ggplot(
+    recorder_cumulative,
+    ggplot2::aes(x = time_bin, y = cumulative_new_species)
+  ) +
+    ggplot2::geom_step(linewidth = 1.1, colour = "darkgreen") +
+    ggplot2::labs(
+      title = sprintf("cumulative new species detected over time: %s", recorder_id),
+      subtitle = plot_subtitle,
+      x = "time bin",
+      y = "cumulative number of new species"
+    ) +
+    analysis_plot_theme()
+
+  recorder_species_plot <- ggplot2::ggplot(
+    recorder_species_counts,
+    ggplot2::aes(x = species_label, y = identification_count)
+  ) +
+    ggplot2::geom_col(fill = "tan3") +
+    ggplot2::coord_flip() +
+    ggplot2::scale_x_discrete(
+      labels = function(x) {
+        parse(text = unname(recorder_species_lookup[as.character(x)]))
+      }
+    ) +
+    ggplot2::scale_y_log10() +
+    ggplot2::labs(
+      title = sprintf("identifications per species: %s", recorder_id),
+      subtitle = sprintf("minimum confidence: %.3f", min_confidence),
+      x = "species",
+      y = "number of identifications (log10 scale)"
+    ) +
+    ggplot2::theme_minimal(base_size = 12) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(face = "bold"),
+      plot.subtitle = ggplot2::element_text(size = 11),
+      axis.text.y = ggplot2::element_text(size = 8.4),
+      panel.grid.minor = ggplot2::element_blank()
+    )
+
+  recorder_species_by_month_plot <- ggplot2::ggplot(
+    recorder_species_by_month,
+    ggplot2::aes(x = species_label, y = identification_count_plot)
+  ) +
+    ggplot2::geom_col(
+      data = recorder_species_by_month_positive,
+      fill = "tan3"
+    ) +
+    ggplot2::coord_flip() +
+    ggplot2::facet_grid(. ~ month_label) +
+    ggplot2::scale_x_discrete(
+      drop = FALSE,
+      labels = function(x) {
+        parse(text = unname(recorder_species_lookup[as.character(x)]))
+      }
+    ) +
+    ggplot2::scale_y_log10() +
+    ggplot2::labs(
+      title = sprintf("identifications per species by month: %s", recorder_id),
+      subtitle = sprintf("minimum confidence: %.3f", min_confidence),
+      x = "species",
+      y = "number of identifications (log10 scale)"
+    ) +
+    ggplot2::theme_minimal(base_size = 12) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(face = "bold"),
+      plot.subtitle = ggplot2::element_text(size = 11),
+      axis.text.y = ggplot2::element_text(size = 8.4),
+      panel.grid.minor = ggplot2::element_blank()
+    )
+
+  recorder_diversity_plot <- ggplot2::ggplot(
+    recorder_diversity_long,
+    ggplot2::aes(x = month_start, y = metric_value, group = 1)
+  ) +
+    ggplot2::geom_line(linewidth = 0.9, colour = "steelblue4") +
+    ggplot2::geom_point(size = 2, colour = "steelblue4") +
+    ggplot2::facet_wrap(~metric_name, scales = "free_y", ncol = 2) +
+    ggplot2::labs(
+      title = sprintf("monthly diversity metrics: %s", recorder_id),
+      subtitle = "detections treated as relative abundance for Shannon, Simpson, and Hill numbers",
+      x = "month",
+      y = "metric value"
+    ) +
+    ggplot2::scale_x_date(date_labels = "%Y-%m") +
+    analysis_plot_theme()
+
+  if (nrow(recorder_periodicity) > 0) {
+    recorder_periodicity_plot <- ggplot2::ggplot(
+      recorder_periodicity,
+      ggplot2::aes(x = x_value, y = y_value)
+    ) +
+      ggplot2::geom_line(linewidth = 0.9, colour = "firebrick3") +
+      ggplot2::facet_wrap(~panel, scales = "free", ncol = 1) +
+      ggplot2::labs(
+        title = sprintf("temporal periodicity of identification rates: %s", recorder_id),
+        subtitle = plot_subtitle,
+        x = "lag / period (hours)",
+        y = "metric value"
+      ) +
+      analysis_plot_theme()
+
+    if (any(recorder_periodicity$panel == "autocorrelation")) {
+      recorder_periodicity_plot <- recorder_periodicity_plot +
+        ggplot2::geom_hline(
+          data = data.frame(panel = "autocorrelation", yintercept = 0),
+          ggplot2::aes(yintercept = yintercept),
+          inherit.aes = FALSE,
+          linetype = "dashed",
+          colour = "grey40"
+        )
+    }
+  } else {
+    recorder_periodicity_plot <- make_placeholder_plot(
+      title_text = sprintf("temporal periodicity of identification rates: %s", recorder_id),
+      subtitle_text = plot_subtitle,
+      body_text = "not enough variation or time bins are currently available\nfor recorder-specific autocorrelation or spectral analysis."
+    )
+  }
+
+  ggplot2::ggsave(file.path(recorder_dir, "birdnet_identifications_over_time.png"), recorder_time_series_plot, width = 12, height = 7, dpi = 150)
+  ggplot2::ggsave(file.path(recorder_dir, "birdnet_cumulative_new_species.png"), recorder_cumulative_plot, width = 12, height = 7, dpi = 150)
+  ggplot2::ggsave(file.path(recorder_dir, "birdnet_identifications_by_species.png"), recorder_species_plot, width = 13, height = 10, dpi = 150)
+  ggplot2::ggsave(file.path(recorder_dir, "birdnet_identifications_by_species_by_month.png"), recorder_species_by_month_plot, width = 16, height = 12, dpi = 150)
+  ggplot2::ggsave(file.path(recorder_dir, "birdnet_monthly_diversity_metrics.png"), recorder_diversity_plot, width = 14, height = 10, dpi = 150)
+  ggplot2::ggsave(file.path(recorder_dir, "birdnet_periodicity.png"), recorder_periodicity_plot, width = 12, height = 9, dpi = 150)
+}
 
 message(sprintf("Analysis complete. Outputs written to: %s", output_dir))

@@ -202,6 +202,19 @@ split_stream_text <- function(text) {
   sanitize_stream_lines(pieces)
 }
 
+filter_birdnet_progress_lines <- function(lines) {
+  if (length(lines) == 0) {
+    return(lines)
+  }
+
+  excluded_pattern <- paste0(
+    "^WARNING: Attempting to use a delegate that only supports static-sized tensors ",
+    "with a graph that has dynamic-sized tensors \\(tensor#187 is a dynamic-sized tensor\\)\\.?$"
+  )
+
+  lines[!grepl(excluded_pattern, trimws(lines))]
+}
+
 consume_stream_text <- function(buffer, text) {
   if (length(text) == 0 || is.null(text) || !nzchar(text)) {
     return(list(lines = character(), buffer = buffer))
@@ -428,7 +441,7 @@ run_monitored_birdnet_analysis <- function(script_dir,
     stdout_lines <- bg$read_output_lines()
     stderr_lines <- bg$read_error_lines()
     if (length(stdout_lines) > 0 || length(stderr_lines) > 0) {
-      output_lines <- c(output_lines, stdout_lines, stderr_lines)
+      output_lines <- c(output_lines, filter_birdnet_progress_lines(c(stdout_lines, stderr_lines)))
     }
 
     now <- Sys.time()
@@ -479,7 +492,7 @@ run_monitored_birdnet_analysis <- function(script_dir,
 
   stdout_lines <- bg$read_output_lines()
   stderr_lines <- bg$read_error_lines()
-  output_lines <- c(output_lines, stdout_lines, stderr_lines)
+  output_lines <- c(output_lines, filter_birdnet_progress_lines(c(stdout_lines, stderr_lines)))
 
   status <- bg$get_exit_status()
   if (!identical(status, 0L)) {

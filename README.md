@@ -262,7 +262,7 @@ The analysis workflow writes:
   species ranked by identification frequency within each month of the year
 
 - `birdnet_monthly_diversity_metrics.csv`  
-  monthly recorder-level diversity metrics calculated from detections-as-abundance, including Shannon index, Simpson index, and Hill numbers for q = 1 and q = 2
+  monthly recorder-level diversity metrics calculated from detections-as-abundance, including Shannon index, Simpson index, and Hill numbers for <em>q</em> = 1 and <em>q</em> = 2
 
 - `birdnet_identification_acf.csv`  
   autocorrelation values by temporal lag

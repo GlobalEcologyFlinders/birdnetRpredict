@@ -75,10 +75,10 @@ macOS sidecar entries such as `._*.flac` and `__MACOSX/` metadata are skipped du
 3. filters detections by a user-defined minimum confidence threshold
 4. bins detections into a user-defined time step (default `60` minutes)
 5. writes aggregate CSV tables plus plots for:
-   - identifications over time
-   - cumulative new species over time
-   - identifications per species
-   - temporal autocorrelation and spectral periodicity
+    - identifications over time
+    - cumulative new species over time
+    - identifications per species
+    - temporal autocorrelation, partial autocorrelation, spectral periodicity, and Ljung-Box periodicity tests for both detections-per-bin and unique-species-per-bin
 
 This script is intended to work while archive processing is still incomplete. You can rerun it at any time and it will analyse whatever summary CSVs currently exist in `out/`.
 
@@ -287,13 +287,31 @@ The analysis workflow writes:
   monthly diversity metrics after combining detections across all currently analysed recorders
 
 - `birdnet_identification_acf.csv`  
-  autocorrelation values by temporal lag
+  detection-count autocorrelation values by temporal lag, retained for backward compatibility
 
 - `birdnet_identification_spectrum.csv`  
-  spectral-density summary for inspecting periodicity
+  detection-count spectral-density summary for inspecting periodicity, retained for backward compatibility
 
 - `birdnet_identification_periodicity_by_recorder.csv`  
-  recorder-specific autocorrelation and spectral-periodicity values used by the recorder comparison figure
+  recorder-specific detection-count temporal diagnostics used by the recorder comparison figure
+
+- `birdnet_temporal_diagnostics.csv`  
+  combined temporal diagnostics for both detections per bin and unique species identified per bin, including autocorrelation (ACF), partial autocorrelation (PACF), and spectral-density curves
+
+- `birdnet_temporal_periodicity_tests.csv`  
+  Ljung-Box test summaries at key lags for both detections per bin and unique species identified per bin
+
+- `birdnet_temporal_spectral_peaks.csv`  
+  ranked dominant spectral peaks, including the strongest candidate periods and their relative power
+
+- `birdnet_temporal_diagnostics_by_recorder.csv`  
+  recorder-specific ACF, PACF, and spectral-density values for both detections per bin and unique species identified per bin
+
+- `birdnet_temporal_periodicity_tests_by_recorder.csv`  
+  recorder-specific Ljung-Box test summaries at key lags
+
+- `birdnet_temporal_spectral_peaks_by_recorder.csv`  
+  recorder-specific dominant spectral peaks for easier interpretation of likely recurring periods
 
 - `birdnet_identifications_over_time.png`
 - `birdnet_top_10_species_detections_through_time.png`
@@ -302,7 +320,7 @@ The analysis workflow writes:
 - `birdnet_identifications_by_species_by_month.png`
 - `birdnet_monthly_diversity_metrics.png`
 - `birdnet_periodicity.png`  
-  overall figures combining all recorders currently present in the analysis
+  overall temporal-diagnostics figure combining all recorders currently present in the analysis, with ACF, PACF, and spectral-density panels for detections and unique species
 
 - `birdnet_identifications_over_time_by_recorder.png`
 - `birdnet_top_10_species_detections_through_time_by_recorder.png`
@@ -311,7 +329,7 @@ The analysis workflow writes:
 - `birdnet_identifications_by_species_by_month_by_recorder.png`
 - `birdnet_monthly_diversity_metrics_by_recorder.png`
 - `birdnet_periodicity_by_recorder.png`  
-  multi-panel recorder-comparison figures
+  multi-panel recorder-comparison temporal-diagnostics figure with detection and species-richness periodicity panels
 
 - `recorders/<RECORDER_ID>/...`  
   recorder-specific figures written for each recorder that currently has usable detections (for example `recorders/GEL_A/`)
@@ -321,6 +339,7 @@ The root-level analysis figures are the combined overall results across all reco
 Monthly diversity metrics treat the number of detections per species as the abundance proxy for Shannon, Simpson, and Hill-number calculations, and are produced as overall combined figures, recorder-specific figures, and recorder-comparison figures.
 The top-species time-series plots default to 24-hour bins through `top_species_time_bin_minutes <- 24 * 60`, but that bin size can be changed directly in `scripts/analyse_birdnet_output.R`.
 In the recorder-comparison diversity figure, each recorder-by-metric panel now uses its own y-axis range so Shannon, Simpson, and Hill-number panels are scaled to their local maxima.
+The temporal periodicity figures now show both detections per time bin and unique species identified per time bin. ACF and PACF panels include approximate significance bands (±1.96/√N), spectral-density panels mark the strongest candidate periods, and the companion Ljung-Box CSV outputs provide a compact test summary at key lags for easier interpretation of recurring temporal structure.
 
 ### Diversity-metric calculations
 

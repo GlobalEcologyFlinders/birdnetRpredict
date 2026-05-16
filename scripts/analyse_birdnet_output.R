@@ -1,13 +1,26 @@
+# user-defined settings ----------------------------------------------------
+analysis_timezone <- "Australia/Adelaide"
+bin_minutes <- 60
+top_species_time_bin_minutes <- 24 * 60
+min_confidence <- 0.1
+periodicity_max_lag_bins <- 48L
+show_plots_in_session <- TRUE
+# -------------------------------------------------------------------------
+
 get_current_file_path <- function() {
   command_args <- commandArgs(trailingOnly = FALSE)
   file_args <- grep("^--file=", command_args, value = TRUE)
 
   if (length(file_args) > 0) {
-    return(normalizePath(sub("^--file=", "", file_args[1])))
+    candidate_path <- sub("^--file=", "", file_args[1])
+
+    if (nzchar(candidate_path) && candidate_path != "-" && file.exists(candidate_path)) {
+      return(normalizePath(candidate_path))
+    }
   }
 
   for (frame in rev(sys.frames())) {
-    if (!is.null(frame$ofile)) {
+    if (!is.null(frame$ofile) && nzchar(frame$ofile) && file.exists(frame$ofile)) {
       return(normalizePath(frame$ofile))
     }
   }
@@ -148,6 +161,16 @@ build_complete_time_grid <- function(start_time, end_time, bin_minutes, timezone
   start_bin <- floor_to_bin(start_time, bin_minutes = bin_minutes, timezone = timezone)
   end_bin <- floor_to_bin(end_time, bin_minutes = bin_minutes, timezone = timezone)
 
+  if (bin_minutes %% (24 * 60) == 0) {
+    day_step <- bin_minutes / (24 * 60)
+    local_days <- seq(
+      from = as.Date(start_bin, tz = timezone),
+      to = as.Date(end_bin, tz = timezone),
+      by = sprintf("%d days", day_step)
+    )
+    return(as.POSIXct(format(local_days, "%Y-%m-%d"), tz = timezone))
+  }
+
   seq(from = start_bin, to = end_bin, by = sprintf("%d mins", bin_minutes))
 }
 
@@ -171,6 +194,21 @@ analysis_plot_theme <- function() {
       plot.subtitle = ggplot2::element_text(size = 11),
       axis.text.x = ggplot2::element_text(angle = 45, hjust = 1),
       panel.grid.minor = ggplot2::element_blank()
+    )
+}
+
+top_species_plot_theme <- function() {
+  analysis_plot_theme() +
+    ggplot2::theme(
+      legend.position = "top",
+      legend.direction = "horizontal",
+      legend.box = "horizontal",
+      legend.title = ggplot2::element_text(size = 9),
+      legend.text = ggplot2::element_text(size = 8),
+      legend.key.height = grid::unit(0.35, "cm"),
+      legend.key.width = grid::unit(0.65, "cm"),
+      legend.box.spacing = grid::unit(0.1, "cm"),
+      legend.spacing.x = grid::unit(0.1, "cm")
     )
 }
 
@@ -532,29 +570,193 @@ build_species_counts_by_month_for_subset <- function(detections_subset,
   species_counts_by_month
 }
 
-build_periodicity_frames <- function(time_series_summary, bin_minutes, periodicity_max_lag_bins) {
-  bin_counts <- time_series_summary$identification_count
-  periodicity_frames <- list()
+empty_temporal_diagnostics_df <- function() {
+  data.frame(
+    metric_name = character(),
+    panel = character(),
+    x_value = numeric(),
+    y_value = numeric(),
+    lag_bin = numeric(),
+    lag_hours = numeric(),
+    frequency_cycles_per_bin = numeric(),
+    period_bins = numeric(),
+    period_hours = numeric(),
+    significance_limit = numeric(),
+    stringsAsFactors = FALSE
+  )
+}
 
-  if (length(bin_counts) >= 2 && length(unique(bin_counts)) > 1) {
-    acf_result <- stats::acf(
-      bin_counts,
-      plot = FALSE,
-      lag.max = min(periodicity_max_lag_bins, length(bin_counts) - 1L),
-      na.action = stats::na.pass
+empty_temporal_tests_df <- function() {
+  data.frame(
+    metric_name = character(),
+    test_name = character(),
+    lag_bin = numeric(),
+    lag_hours = numeric(),
+    statistic = numeric(),
+    p_value = numeric(),
+    significant = logical(),
+    stringsAsFactors = FALSE
+  )
+}
+
+empty_temporal_peaks_df <- function() {
+  data.frame(
+    metric_name = character(),
+    peak_rank = integer(),
+    frequency_cycles_per_bin = numeric(),
+    period_bins = numeric(),
+    period_hours = numeric(),
+    spectral_density = numeric(),
+    relative_power = numeric(),
+    stringsAsFactors = FALSE
+  )
+}
+
+bind_data_frames <- function(data_frames, empty_template) {
+  valid_frames <- Filter(function(x) !is.null(x) && nrow(x) > 0, data_frames)
+
+  if (length(valid_frames) == 0) {
+    return(empty_template)
+  }
+
+  do.call(rbind, valid_frames)
+}
+
+identify_spectral_peaks <- function(frequency_cycles_per_bin, spectral_density, metric_name, bin_minutes, max_peaks = 5L) {
+  if (length(spectral_density) == 0) {
+    return(empty_temporal_peaks_df())
+  }
+
+  if (length(spectral_density) < 3) {
+    local_peak_indices <- order(spectral_density, decreasing = TRUE)
+  } else {
+    local_peak_indices <- which(
+      c(
+        FALSE,
+        spectral_density[2:(length(spectral_density) - 1L)] > spectral_density[1:(length(spectral_density) - 2L)] &
+          spectral_density[2:(length(spectral_density) - 1L)] >= spectral_density[3:length(spectral_density)],
+        FALSE
+      )
     )
 
-    periodicity_frames[[length(periodicity_frames) + 1L]] <- data.frame(
-      panel = "autocorrelation",
+    if (length(local_peak_indices) == 0) {
+      local_peak_indices <- order(spectral_density, decreasing = TRUE)
+    } else {
+      local_peak_indices <- local_peak_indices[order(spectral_density[local_peak_indices], decreasing = TRUE)]
+    }
+  }
+
+  local_peak_indices <- unique(local_peak_indices)[seq_len(min(max_peaks, length(local_peak_indices)))]
+
+  data.frame(
+    metric_name = metric_name,
+    peak_rank = seq_along(local_peak_indices),
+    frequency_cycles_per_bin = frequency_cycles_per_bin[local_peak_indices],
+    period_bins = 1 / frequency_cycles_per_bin[local_peak_indices],
+    period_hours = (bin_minutes / 60) / frequency_cycles_per_bin[local_peak_indices],
+    spectral_density = spectral_density[local_peak_indices],
+    relative_power = spectral_density[local_peak_indices] / sum(spectral_density),
+    stringsAsFactors = FALSE
+  )
+}
+
+build_temporal_diagnostics_for_metric <- function(time_series_summary,
+                                                  value_column,
+                                                  metric_name,
+                                                  bin_minutes,
+                                                  periodicity_max_lag_bins) {
+  values <- as.numeric(time_series_summary[[value_column]])
+  diagnostics <- empty_temporal_diagnostics_df()
+  tests <- empty_temporal_tests_df()
+  peaks <- empty_temporal_peaks_df()
+
+  if (length(values) < 2 || length(unique(values)) <= 1) {
+    return(list(diagnostics = diagnostics, tests = tests, peaks = peaks))
+  }
+
+  max_lag <- min(periodicity_max_lag_bins, length(values) - 1L)
+  significance_limit <- 1.96 / sqrt(length(values))
+
+  acf_result <- stats::acf(
+    values,
+    plot = FALSE,
+    lag.max = max_lag,
+    na.action = stats::na.pass
+  )
+  diagnostics <- rbind(
+    diagnostics,
+    data.frame(
+      metric_name = metric_name,
+      panel = "autocorrelation (ACF)",
       x_value = as.numeric(acf_result$lag[, , 1]) * (bin_minutes / 60),
       y_value = as.numeric(acf_result$acf[, , 1]),
+      lag_bin = as.numeric(acf_result$lag[, , 1]),
+      lag_hours = as.numeric(acf_result$lag[, , 1]) * (bin_minutes / 60),
+      frequency_cycles_per_bin = NA_real_,
+      period_bins = NA_real_,
+      period_hours = NA_real_,
+      significance_limit = significance_limit,
       stringsAsFactors = FALSE
+    )
+  )
+
+  if (max_lag >= 1) {
+    pacf_result <- stats::pacf(
+      values,
+      plot = FALSE,
+      lag.max = max_lag,
+      na.action = stats::na.pass
+    )
+    diagnostics <- rbind(
+      diagnostics,
+      data.frame(
+        metric_name = metric_name,
+        panel = "partial autocorrelation (PACF)",
+        x_value = as.numeric(pacf_result$lag) * (bin_minutes / 60),
+        y_value = as.numeric(pacf_result$acf),
+        lag_bin = as.numeric(pacf_result$lag),
+        lag_hours = as.numeric(pacf_result$lag) * (bin_minutes / 60),
+        frequency_cycles_per_bin = NA_real_,
+        period_bins = NA_real_,
+        period_hours = NA_real_,
+        significance_limit = significance_limit,
+        stringsAsFactors = FALSE
+      )
     )
   }
 
-  if (length(bin_counts) >= 4 && sum((bin_counts - mean(bin_counts))^2) > 0) {
+  candidate_lags <- unique(pmin(
+    c(
+      max(1L, as.integer(round((24 * 60) / bin_minutes))),
+      max(1L, as.integer(round((7 * 24 * 60) / bin_minutes))),
+      max_lag
+    ),
+    max_lag
+  ))
+  candidate_lags <- candidate_lags[candidate_lags >= 1]
+
+  if (length(candidate_lags) > 0) {
+    tests <- do.call(
+      rbind,
+      lapply(candidate_lags, function(test_lag) {
+        lb_result <- stats::Box.test(values, lag = test_lag, type = "Ljung-Box")
+        data.frame(
+          metric_name = metric_name,
+          test_name = "Ljung-Box test",
+          lag_bin = test_lag,
+          lag_hours = test_lag * (bin_minutes / 60),
+          statistic = as.numeric(lb_result$statistic),
+          p_value = as.numeric(lb_result$p.value),
+          significant = as.numeric(lb_result$p.value) < 0.05,
+          stringsAsFactors = FALSE
+        )
+      })
+    )
+  }
+
+  if (length(values) >= 4 && sum((values - mean(values))^2) > 0) {
     spectrum_result <- stats::spec.pgram(
-      bin_counts,
+      values,
       taper = 0,
       demean = TRUE,
       detrend = FALSE,
@@ -562,20 +764,170 @@ build_periodicity_frames <- function(time_series_summary, bin_minutes, periodici
       fast = FALSE
     )
     positive_frequency <- spectrum_result$freq > 0
+    spectral_frequency <- spectrum_result$freq[positive_frequency]
+    spectral_density <- spectrum_result$spec[positive_frequency]
 
-    periodicity_frames[[length(periodicity_frames) + 1L]] <- data.frame(
-      panel = "spectral density",
-      x_value = (bin_minutes / 60) / spectrum_result$freq[positive_frequency],
-      y_value = spectrum_result$spec[positive_frequency],
-      stringsAsFactors = FALSE
+    diagnostics <- rbind(
+      diagnostics,
+      data.frame(
+        metric_name = metric_name,
+        panel = "spectral density",
+        x_value = (bin_minutes / 60) / spectral_frequency,
+        y_value = spectral_density,
+        lag_bin = NA_real_,
+        lag_hours = NA_real_,
+        frequency_cycles_per_bin = spectral_frequency,
+        period_bins = 1 / spectral_frequency,
+        period_hours = (bin_minutes / 60) / spectral_frequency,
+        significance_limit = NA_real_,
+        stringsAsFactors = FALSE
+      )
+    )
+
+    peaks <- identify_spectral_peaks(
+      frequency_cycles_per_bin = spectral_frequency,
+      spectral_density = spectral_density,
+      metric_name = metric_name,
+      bin_minutes = bin_minutes
     )
   }
 
-  if (length(periodicity_frames) == 0) {
-    return(data.frame(panel = character(), x_value = numeric(), y_value = numeric(), stringsAsFactors = FALSE))
+  list(diagnostics = diagnostics, tests = tests, peaks = peaks)
+}
+
+build_temporal_diagnostics_bundle <- function(time_series_summary, bin_minutes, periodicity_max_lag_bins) {
+  metric_specs <- data.frame(
+    value_column = c("identification_count", "unique_species_count"),
+    metric_name = c("number of detections per bin", "unique species identified per bin"),
+    stringsAsFactors = FALSE
+  )
+
+  diagnostic_results <- lapply(seq_len(nrow(metric_specs)), function(metric_index) {
+    build_temporal_diagnostics_for_metric(
+      time_series_summary = time_series_summary,
+      value_column = metric_specs$value_column[[metric_index]],
+      metric_name = metric_specs$metric_name[[metric_index]],
+      bin_minutes = bin_minutes,
+      periodicity_max_lag_bins = periodicity_max_lag_bins
+    )
+  })
+
+  list(
+    diagnostics = bind_data_frames(
+      lapply(diagnostic_results, function(result) result$diagnostics),
+      empty_temporal_diagnostics_df()
+    ),
+    tests = bind_data_frames(
+      lapply(diagnostic_results, function(result) result$tests),
+      empty_temporal_tests_df()
+    ),
+    peaks = bind_data_frames(
+      lapply(diagnostic_results, function(result) result$peaks),
+      empty_temporal_peaks_df()
+    )
+  )
+}
+
+build_temporal_diagnostics_plot <- function(diagnostics_df,
+                                            peaks_df,
+                                            title_text,
+                                            subtitle_text,
+                                            facet_column = "facet_label",
+                                            ncol = 2,
+                                            placeholder_text) {
+  if (nrow(diagnostics_df) == 0) {
+    return(make_placeholder_plot(
+      title_text = title_text,
+      subtitle_text = subtitle_text,
+      body_text = placeholder_text
+    ))
   }
 
-  do.call(rbind, periodicity_frames)
+  facet_formula <- stats::as.formula(paste("~", facet_column))
+  plot_object <- ggplot2::ggplot(
+    diagnostics_df,
+    ggplot2::aes(x = x_value, y = y_value)
+  ) +
+    ggplot2::geom_line(linewidth = 0.9, colour = "firebrick3") +
+    ggplot2::facet_wrap(facet_formula, scales = "free", ncol = ncol) +
+    ggplot2::labs(
+      title = title_text,
+      subtitle = subtitle_text,
+      x = "lag / period (hours)",
+      y = "metric value"
+    ) +
+    analysis_plot_theme()
+
+  significance_lines <- unique(
+    diagnostics_df[
+      diagnostics_df$panel %in% c("autocorrelation (ACF)", "partial autocorrelation (PACF)") &
+        !is.na(diagnostics_df$significance_limit),
+      c(facet_column, "significance_limit"),
+      drop = FALSE
+    ]
+  )
+
+  if (nrow(significance_lines) > 0) {
+    zero_lines <- significance_lines
+    zero_lines$yintercept <- 0
+    upper_lines <- significance_lines
+    upper_lines$yintercept <- upper_lines$significance_limit
+    lower_lines <- significance_lines
+    lower_lines$yintercept <- -lower_lines$significance_limit
+
+    plot_object <- plot_object +
+      ggplot2::geom_hline(
+        data = zero_lines,
+        ggplot2::aes(yintercept = yintercept),
+        inherit.aes = FALSE,
+        linetype = "dashed",
+        colour = "grey40"
+      ) +
+      ggplot2::geom_hline(
+        data = upper_lines,
+        ggplot2::aes(yintercept = yintercept),
+        inherit.aes = FALSE,
+        linetype = "dotted",
+        colour = "grey55"
+      ) +
+      ggplot2::geom_hline(
+        data = lower_lines,
+        ggplot2::aes(yintercept = yintercept),
+        inherit.aes = FALSE,
+        linetype = "dotted",
+        colour = "grey55"
+      )
+  }
+
+  if (nrow(peaks_df) > 0) {
+    peak_points <- peaks_df
+    peak_points$x_value <- peak_points$period_hours
+    peak_points$y_value <- peak_points$spectral_density
+    peak_points$peak_label <- sprintf(
+      "peak %d\n%.1f h",
+      peak_points$peak_rank,
+      peak_points$period_hours
+    )
+
+    plot_object <- plot_object +
+      ggplot2::geom_point(
+        data = peak_points,
+        ggplot2::aes(x = x_value, y = y_value),
+        inherit.aes = FALSE,
+        colour = "goldenrod3",
+        size = 2.2
+      ) +
+      ggplot2::geom_text(
+        data = peak_points[peak_points$peak_rank <= 3, , drop = FALSE],
+        ggplot2::aes(x = x_value, y = y_value, label = peak_label),
+        inherit.aes = FALSE,
+        colour = "goldenrod4",
+        size = 3,
+        nudge_y = 0.03 * max(diagnostics_df$y_value, na.rm = TRUE)
+      )
+  }
+
+  plot_object
 }
 
 build_top_species_time_series <- function(detections_subset, bin_minutes, top_n = 10L, timezone) {
@@ -642,6 +994,11 @@ build_top_species_time_series <- function(detections_subset, bin_minutes, top_n 
     all.x = TRUE
   )
   species_time_series$identification_count[is.na(species_time_series$identification_count)] <- 0L
+  species_time_series$identification_count_plot <- ifelse(
+    species_time_series$identification_count > 0,
+    species_time_series$identification_count,
+    NA_real_
+  )
   species_time_series$species_label <- factor(species_time_series$species_label, levels = species_totals$species_label)
   species_time_series
 }
@@ -717,15 +1074,9 @@ if (!requireNamespace("ggplot2", quietly = TRUE)) {
 
 repo_root <- find_repo_root(get_current_file_path())
 
-# User-defined settings ----------------------------------------------------
+# other user-defined settings ----------------------------------------------------
 summary_root <- normalizePath(file.path(repo_root, "out"), mustWork = TRUE)
 output_root <- file.path(summary_root, "analysis")
-analysis_timezone <- "Australia/Adelaide"
-bin_minutes <- 60
-top_species_time_bin_minutes <- 24 * 60
-min_confidence <- 0.05
-periodicity_max_lag_bins <- 48L
-show_plots_in_session <- TRUE
 # -------------------------------------------------------------------------
 
 if (!is.numeric(bin_minutes) || length(bin_minutes) != 1 || is.na(bin_minutes) || bin_minutes <= 0) {
@@ -1014,6 +1365,11 @@ top_species_time_series <- build_top_species_time_series(
   top_n = 10L,
   timezone = analysis_timezone
 )
+top_species_time_series_positive <- top_species_time_series[
+  !is.na(top_species_time_series$identification_count_plot),
+  ,
+  drop = FALSE
+]
 
 overall_monthly_diversity_summary <- build_monthly_diversity_summary(
   transform(filtered_detections, recorder_id = "ALL_RECORDERS"),
@@ -1053,6 +1409,11 @@ top_species_time_series_by_recorder <- do.call(
     subset_top_species
   })
 )
+top_species_time_series_by_recorder_positive <- top_species_time_series_by_recorder[
+  !is.na(top_species_time_series_by_recorder$identification_count_plot),
+  ,
+  drop = FALSE
+]
 
 cumulative_new_species_by_recorder <- do.call(
   rbind,
@@ -1119,66 +1480,77 @@ species_counts_by_month_by_recorder_positive <- species_counts_by_month_by_recor
   drop = FALSE
 ]
 
-periodicity_by_recorder <- do.call(
-  rbind,
+overall_temporal_bundle <- build_temporal_diagnostics_bundle(
+  time_series_summary = time_series_summary,
+  bin_minutes = bin_minutes,
+  periodicity_max_lag_bins = periodicity_max_lag_bins
+)
+temporal_diagnostics <- overall_temporal_bundle$diagnostics
+temporal_tests <- overall_temporal_bundle$tests
+temporal_peaks <- overall_temporal_bundle$peaks
+
+temporal_diagnostics_by_recorder <- bind_data_frames(
   lapply(recorder_ids, function(recorder_id) {
     subset_time_series <- time_series_by_recorder[time_series_by_recorder$recorder_id == recorder_id, , drop = FALSE]
-    subset_periodicity <- build_periodicity_frames(subset_time_series, bin_minutes, periodicity_max_lag_bins)
-    if (nrow(subset_periodicity) == 0) {
+    subset_bundle <- build_temporal_diagnostics_bundle(subset_time_series, bin_minutes, periodicity_max_lag_bins)
+    if (nrow(subset_bundle$diagnostics) == 0) {
       return(NULL)
     }
-    subset_periodicity$recorder_id <- recorder_id
-    subset_periodicity
-  })
+    subset_bundle$diagnostics$recorder_id <- recorder_id
+    subset_bundle$diagnostics
+  }),
+  data.frame(empty_temporal_diagnostics_df(), recorder_id = character(), stringsAsFactors = FALSE)
 )
-if (is.null(periodicity_by_recorder)) {
-  periodicity_by_recorder <- data.frame(
-    panel = character(),
-    x_value = numeric(),
-    y_value = numeric(),
-    recorder_id = character(),
-    stringsAsFactors = FALSE
-  )
-}
 
-bin_counts <- time_series_summary$identification_count
-acf_table <- data.frame(lag_bin = numeric(), lag_hours = numeric(), autocorrelation = numeric())
-spectrum_table <- data.frame(frequency_cycles_per_bin = numeric(), period_bins = numeric(), period_hours = numeric(), spectral_density = numeric())
+temporal_tests_by_recorder <- bind_data_frames(
+  lapply(recorder_ids, function(recorder_id) {
+    subset_time_series <- time_series_by_recorder[time_series_by_recorder$recorder_id == recorder_id, , drop = FALSE]
+    subset_bundle <- build_temporal_diagnostics_bundle(subset_time_series, bin_minutes, periodicity_max_lag_bins)
+    if (nrow(subset_bundle$tests) == 0) {
+      return(NULL)
+    }
+    subset_bundle$tests$recorder_id <- recorder_id
+    subset_bundle$tests
+  }),
+  data.frame(empty_temporal_tests_df(), recorder_id = character(), stringsAsFactors = FALSE)
+)
 
-if (length(bin_counts) >= 2 && length(unique(bin_counts)) > 1) {
-  acf_result <- stats::acf(
-    bin_counts,
-    plot = FALSE,
-    lag.max = min(periodicity_max_lag_bins, length(bin_counts) - 1L),
-    na.action = stats::na.pass
-  )
+temporal_peaks_by_recorder <- bind_data_frames(
+  lapply(recorder_ids, function(recorder_id) {
+    subset_time_series <- time_series_by_recorder[time_series_by_recorder$recorder_id == recorder_id, , drop = FALSE]
+    subset_bundle <- build_temporal_diagnostics_bundle(subset_time_series, bin_minutes, periodicity_max_lag_bins)
+    if (nrow(subset_bundle$peaks) == 0) {
+      return(NULL)
+    }
+    subset_bundle$peaks$recorder_id <- recorder_id
+    subset_bundle$peaks
+  }),
+  data.frame(empty_temporal_peaks_df(), recorder_id = character(), stringsAsFactors = FALSE)
+)
 
-  acf_table <- data.frame(
-    lag_bin = as.numeric(acf_result$lag[, , 1]),
-    lag_hours = as.numeric(acf_result$lag[, , 1]) * (bin_minutes / 60),
-    autocorrelation = as.numeric(acf_result$acf[, , 1])
-  )
-}
+detection_metric_name <- "number of detections per bin"
 
-if (length(bin_counts) >= 4 && sum((bin_counts - mean(bin_counts))^2) > 0) {
-  spectrum_result <- stats::spec.pgram(
-    bin_counts,
-    taper = 0,
-    demean = TRUE,
-    detrend = FALSE,
-    plot = FALSE,
-    fast = FALSE
-  )
+acf_table <- temporal_diagnostics[
+  temporal_diagnostics$metric_name == detection_metric_name &
+    temporal_diagnostics$panel == "autocorrelation (ACF)",
+  c("lag_bin", "lag_hours", "y_value", "significance_limit"),
+  drop = FALSE
+]
+names(acf_table)[names(acf_table) == "y_value"] <- "autocorrelation"
 
-  positive_frequency <- spectrum_result$freq > 0
-  spectrum_table <- data.frame(
-    frequency_cycles_per_bin = spectrum_result$freq[positive_frequency],
-    period_bins = 1 / spectrum_result$freq[positive_frequency],
-    period_hours = (bin_minutes / 60) / spectrum_result$freq[positive_frequency],
-    spectral_density = spectrum_result$spec[positive_frequency]
-  )
-  spectrum_table <- spectrum_table[order(spectrum_table$period_hours), , drop = FALSE]
-}
+spectrum_table <- temporal_diagnostics[
+  temporal_diagnostics$metric_name == detection_metric_name &
+    temporal_diagnostics$panel == "spectral density",
+  c("frequency_cycles_per_bin", "period_bins", "period_hours", "y_value"),
+  drop = FALSE
+]
+names(spectrum_table)[names(spectrum_table) == "y_value"] <- "spectral_density"
+
+periodicity_by_recorder <- temporal_diagnostics_by_recorder[
+  temporal_diagnostics_by_recorder$metric_name == detection_metric_name,
+  c("metric_name", "panel", "x_value", "y_value", "significance_limit", "recorder_id"),
+  drop = FALSE
+]
 
 analysis_summary_txt <- file.path(output_dir, "birdnet_analysis_summary.txt")
 input_files_csv <- file.path(output_dir, "birdnet_analysis_input_files.csv")
@@ -1197,7 +1569,13 @@ monthly_diversity_csv <- file.path(output_dir, "birdnet_monthly_diversity_metric
 overall_monthly_diversity_csv <- file.path(output_dir, "birdnet_monthly_diversity_metrics_overall.csv")
 acf_csv <- file.path(output_dir, "birdnet_identification_acf.csv")
 spectrum_csv <- file.path(output_dir, "birdnet_identification_spectrum.csv")
+temporal_diagnostics_csv <- file.path(output_dir, "birdnet_temporal_diagnostics.csv")
+temporal_tests_csv <- file.path(output_dir, "birdnet_temporal_periodicity_tests.csv")
+temporal_peaks_csv <- file.path(output_dir, "birdnet_temporal_spectral_peaks.csv")
 periodicity_by_recorder_csv <- file.path(output_dir, "birdnet_identification_periodicity_by_recorder.csv")
+temporal_diagnostics_by_recorder_csv <- file.path(output_dir, "birdnet_temporal_diagnostics_by_recorder.csv")
+temporal_tests_by_recorder_csv <- file.path(output_dir, "birdnet_temporal_periodicity_tests_by_recorder.csv")
+temporal_peaks_by_recorder_csv <- file.path(output_dir, "birdnet_temporal_spectral_peaks_by_recorder.csv")
 
 write.csv(file_status, input_files_csv, row.names = FALSE)
 write.csv(filtered_detections, filtered_detections_csv, row.names = FALSE)
@@ -1215,7 +1593,13 @@ write.csv(monthly_diversity_summary, monthly_diversity_csv, row.names = FALSE)
 write.csv(overall_monthly_diversity_summary, overall_monthly_diversity_csv, row.names = FALSE)
 write.csv(acf_table, acf_csv, row.names = FALSE)
 write.csv(spectrum_table, spectrum_csv, row.names = FALSE)
+write.csv(temporal_diagnostics, temporal_diagnostics_csv, row.names = FALSE)
+write.csv(temporal_tests, temporal_tests_csv, row.names = FALSE)
+write.csv(temporal_peaks, temporal_peaks_csv, row.names = FALSE)
 write.csv(periodicity_by_recorder, periodicity_by_recorder_csv, row.names = FALSE)
+write.csv(temporal_diagnostics_by_recorder, temporal_diagnostics_by_recorder_csv, row.names = FALSE)
+write.csv(temporal_tests_by_recorder, temporal_tests_by_recorder_csv, row.names = FALSE)
+write.csv(temporal_peaks_by_recorder, temporal_peaks_by_recorder_csv, row.names = FALSE)
 
 generated_at <- Sys.time()
 write_analysis_summary(
@@ -1336,23 +1720,25 @@ monthly_diversity_plot <- ggplot2::ggplot(
 
 top_species_plot <- ggplot2::ggplot(
   top_species_time_series,
-  ggplot2::aes(x = time_bin, y = identification_count, colour = species_label, group = species_label)
+  ggplot2::aes(x = time_bin, y = identification_count_plot, colour = species_label, group = species_label)
 ) +
-  ggplot2::geom_line(linewidth = 0.9) +
-  ggplot2::geom_point(size = 1.5) +
+  ggplot2::geom_line(data = top_species_time_series_positive, linewidth = 0.9) +
+  ggplot2::geom_point(data = top_species_time_series_positive, size = 1.5) +
   ggplot2::scale_colour_discrete(
     labels = function(x) {
       parse(text = unname(species_label_plotmath_lookup[as.character(x)]))
-    }
+    },
+    guide = ggplot2::guide_legend(nrow = 2, byrow = TRUE)
   ) +
+  ggplot2::scale_y_log10() +
   ggplot2::labs(
     title = "detections through time for the 10 most detected species",
     subtitle = sprintf("bin size: %s hours | minimum confidence: %.3f", round(top_species_time_bin_minutes / 60, 2), min_confidence),
     x = "time bin",
-    y = "number of detections",
+    y = expression("number of detections (" * log[10] * " scale)"),
     colour = "species"
   ) +
-  analysis_plot_theme()
+  top_species_plot_theme()
 
 time_series_by_recorder_plot <- ggplot2::ggplot(
   time_series_by_recorder,
@@ -1466,114 +1852,74 @@ monthly_diversity_by_recorder_plot <- ggplot2::ggplot(
 
 top_species_by_recorder_plot <- ggplot2::ggplot(
   top_species_time_series_by_recorder,
-  ggplot2::aes(x = time_bin, y = identification_count, colour = species_label, group = species_label)
+  ggplot2::aes(x = time_bin, y = identification_count_plot, colour = species_label, group = species_label)
 ) +
-  ggplot2::geom_line(linewidth = 0.9) +
-  ggplot2::geom_point(size = 1.3) +
+  ggplot2::geom_line(data = top_species_time_series_by_recorder_positive, linewidth = 0.9) +
+  ggplot2::geom_point(data = top_species_time_series_by_recorder_positive, size = 1.3) +
   ggplot2::facet_grid(recorder_id ~ ., scales = "free_y") +
   ggplot2::scale_colour_discrete(
     labels = function(x) {
       parse(text = unname(species_label_plotmath_lookup[as.character(x)]))
-    }
+    },
+    guide = ggplot2::guide_legend(nrow = 2, byrow = TRUE)
   ) +
+  ggplot2::scale_y_log10() +
   ggplot2::labs(
     title = "detections through time for the 10 most detected species by recorder",
     subtitle = sprintf("bin size: %s hours | minimum confidence: %.3f", round(top_species_time_bin_minutes / 60, 2), min_confidence),
     x = "time bin",
-    y = "number of detections",
+    y = expression("number of detections (" * log[10] * " scale)"),
     colour = "species"
   ) +
-  analysis_plot_theme()
+  top_species_plot_theme()
 
-periodicity_frames <- list()
-
-if (nrow(acf_table) > 0) {
-  periodicity_frames[[length(periodicity_frames) + 1L]] <- data.frame(
-    panel = "autocorrelation",
-    x_value = acf_table$lag_hours,
-    y_value = acf_table$autocorrelation,
-    stringsAsFactors = FALSE
+temporal_diagnostics$facet_label <- paste(temporal_diagnostics$metric_name, temporal_diagnostics$panel, sep = "\n")
+temporal_peaks$facet_label <- paste(temporal_peaks$metric_name, "spectral density", sep = "\n")
+periodicity_plot <- build_temporal_diagnostics_plot(
+  diagnostics_df = temporal_diagnostics,
+  peaks_df = temporal_peaks,
+  title_text = "temporal periodicity diagnostics for detections and species richness",
+  subtitle_text = plot_subtitle,
+  facet_column = "facet_label",
+  ncol = 2,
+  placeholder_text = paste(
+    "not enough variation or time bins are currently available",
+    "for autocorrelation, partial-autocorrelation, or spectral periodicity analysis.",
+    sep = "\n"
   )
-}
+)
 
-if (nrow(spectrum_table) > 0) {
-  periodicity_frames[[length(periodicity_frames) + 1L]] <- data.frame(
-    panel = "spectral density",
-    x_value = spectrum_table$period_hours,
-    y_value = spectrum_table$spectral_density,
-    stringsAsFactors = FALSE
+temporal_diagnostics_by_recorder$facet_label <- paste(
+  temporal_diagnostics_by_recorder$recorder_id,
+  temporal_diagnostics_by_recorder$metric_name,
+  temporal_diagnostics_by_recorder$panel,
+  sep = "\n"
+)
+temporal_peaks_by_recorder$facet_label <- paste(
+  temporal_peaks_by_recorder$recorder_id,
+  temporal_peaks_by_recorder$metric_name,
+  "spectral density",
+  sep = "\n"
+)
+periodicity_by_recorder_plot <- build_temporal_diagnostics_plot(
+  diagnostics_df = temporal_diagnostics_by_recorder,
+  peaks_df = temporal_peaks_by_recorder,
+  title_text = "temporal periodicity diagnostics by recorder",
+  subtitle_text = plot_subtitle,
+  facet_column = "facet_label",
+  ncol = 2,
+  placeholder_text = paste(
+    "not enough variation or time bins are currently available",
+    "for recorder-specific autocorrelation, PACF, or spectral analysis.",
+    sep = "\n"
   )
-}
-
-if (length(periodicity_frames) > 0) {
-  periodicity_data <- do.call(rbind, periodicity_frames)
-  periodicity_plot <- ggplot2::ggplot(
-    periodicity_data,
-    ggplot2::aes(x = x_value, y = y_value)
-  ) +
-    ggplot2::geom_line(linewidth = 0.9, colour = "firebrick3") +
-    ggplot2::facet_wrap(~panel, scales = "free", ncol = 1) +
-    ggplot2::labs(
-      title = "temporal periodicity of identification rates",
-      subtitle = plot_subtitle,
-      x = "lag / period (hours)",
-      y = "metric value"
-    ) +
-    analysis_plot_theme()
-
-  if (nrow(acf_table) > 0) {
-    periodicity_plot <- periodicity_plot +
-      ggplot2::geom_hline(
-        data = data.frame(panel = "autocorrelation", yintercept = 0),
-        ggplot2::aes(yintercept = yintercept),
-        inherit.aes = FALSE,
-        linetype = "dashed",
-        colour = "grey40"
-      )
-  }
-} else {
-  periodicity_plot <- make_placeholder_plot(
-    title_text = "temporal periodicity of identification rates",
-    subtitle_text = plot_subtitle,
-    body_text = "not enough variation or time bins are currently available\nfor autocorrelation or spectral periodicity analysis."
-  )
-}
-
-if (nrow(periodicity_by_recorder) > 0) {
-  periodicity_by_recorder$facet_label <- paste(periodicity_by_recorder$recorder_id, periodicity_by_recorder$panel, sep = "\n")
-  periodicity_by_recorder_plot <- ggplot2::ggplot(
-    periodicity_by_recorder,
-    ggplot2::aes(x = x_value, y = y_value)
-  ) +
-    ggplot2::geom_line(linewidth = 0.9, colour = "firebrick3") +
-    ggplot2::facet_wrap(~facet_label, scales = "free", ncol = 2) +
-    ggplot2::labs(
-      title = "temporal periodicity of identification rates by recorder",
-      subtitle = plot_subtitle,
-      x = "lag / period (hours)",
-      y = "metric value"
-    ) +
-    analysis_plot_theme()
-
-  if (any(periodicity_by_recorder$panel == "autocorrelation")) {
-    periodicity_by_recorder_plot <- periodicity_by_recorder_plot +
-      ggplot2::geom_hline(
-        data = unique(periodicity_by_recorder[periodicity_by_recorder$panel == "autocorrelation", "facet_label", drop = FALSE]),
-        ggplot2::aes(yintercept = 0),
-        inherit.aes = FALSE,
-        linetype = "dashed",
-        colour = "grey40"
-      )
-  }
-} else {
-  periodicity_by_recorder_plot <- make_placeholder_plot(
-    title_text = "temporal periodicity of identification rates by recorder",
-    subtitle_text = plot_subtitle,
-    body_text = "not enough variation or time bins are currently available\nfor recorder-specific autocorrelation or spectral analysis."
-  )
-}
+)
 
 if (isTRUE(show_plots_in_session) && interactive()) {
+  while (grDevices::dev.cur() > 1) {
+    grDevices::dev.off()
+  }
+
   print(time_series_plot)
   print(cumulative_species_plot)
   print(species_counts_plot)
@@ -1677,15 +2023,15 @@ ggplot2::ggsave(
 ggplot2::ggsave(
   filename = file.path(output_dir, "birdnet_periodicity.png"),
   plot = periodicity_plot,
-  width = 12,
-  height = 9,
+  width = 15,
+  height = 11,
   dpi = 150
 )
 ggplot2::ggsave(
   filename = file.path(output_dir, "birdnet_periodicity_by_recorder.png"),
   plot = periodicity_by_recorder_plot,
-  width = 14,
-  height = max(8, 3 * length(recorder_ids)),
+  width = 16,
+  height = max(10, 4.2 * length(recorder_ids)),
   dpi = 150
 )
 
@@ -1718,7 +2064,16 @@ for (recorder_id in recorder_ids) {
   recorder_species_by_month_positive$species_label <- factor(as.character(recorder_species_by_month_positive$species_label), levels = recorder_species_levels)
 
   recorder_diversity_long <- monthly_diversity_long[monthly_diversity_long$recorder_id == recorder_id, , drop = FALSE]
-  recorder_periodicity <- periodicity_by_recorder[periodicity_by_recorder$recorder_id == recorder_id, , drop = FALSE]
+  recorder_temporal_diagnostics <- temporal_diagnostics_by_recorder[
+    temporal_diagnostics_by_recorder$recorder_id == recorder_id,
+    ,
+    drop = FALSE
+  ]
+  recorder_temporal_peaks <- temporal_peaks_by_recorder[
+    temporal_peaks_by_recorder$recorder_id == recorder_id,
+    ,
+    drop = FALSE
+  ]
   recorder_top_species <- top_species_time_series_by_recorder[
     top_species_time_series_by_recorder$recorder_id == recorder_id,
     ,
@@ -1829,56 +2184,55 @@ for (recorder_id in recorder_ids) {
 
   recorder_top_species_plot <- ggplot2::ggplot(
     recorder_top_species,
-    ggplot2::aes(x = time_bin, y = identification_count, colour = species_label, group = species_label)
+    ggplot2::aes(x = time_bin, y = identification_count_plot, colour = species_label, group = species_label)
   ) +
-    ggplot2::geom_line(linewidth = 0.9) +
-    ggplot2::geom_point(size = 1.5) +
+    ggplot2::geom_line(
+      data = recorder_top_species[!is.na(recorder_top_species$identification_count_plot), , drop = FALSE],
+      linewidth = 0.9
+    ) +
+    ggplot2::geom_point(
+      data = recorder_top_species[!is.na(recorder_top_species$identification_count_plot), , drop = FALSE],
+      size = 1.5
+    ) +
     ggplot2::scale_colour_discrete(
       labels = function(x) {
         parse(text = unname(recorder_top_species_lookup[as.character(x)]))
-      }
+      },
+      guide = ggplot2::guide_legend(nrow = 2, byrow = TRUE)
     ) +
+    ggplot2::scale_y_log10() +
     ggplot2::labs(
       title = sprintf("detections through time for the 10 most detected species: %s", recorder_id),
       subtitle = sprintf("bin size: %s hours | minimum confidence: %.3f", round(top_species_time_bin_minutes / 60, 2), min_confidence),
       x = "time bin",
-      y = "number of detections",
+      y = expression("number of detections (" * log[10] * " scale)"),
       colour = "species"
     ) +
-    analysis_plot_theme()
+    top_species_plot_theme()
 
-  if (nrow(recorder_periodicity) > 0) {
-    recorder_periodicity_plot <- ggplot2::ggplot(
-      recorder_periodicity,
-      ggplot2::aes(x = x_value, y = y_value)
-    ) +
-      ggplot2::geom_line(linewidth = 0.9, colour = "firebrick3") +
-      ggplot2::facet_wrap(~panel, scales = "free", ncol = 1) +
-      ggplot2::labs(
-        title = sprintf("temporal periodicity of identification rates: %s", recorder_id),
-        subtitle = plot_subtitle,
-        x = "lag / period (hours)",
-        y = "metric value"
-      ) +
-      analysis_plot_theme()
-
-    if (any(recorder_periodicity$panel == "autocorrelation")) {
-      recorder_periodicity_plot <- recorder_periodicity_plot +
-        ggplot2::geom_hline(
-          data = data.frame(panel = "autocorrelation", yintercept = 0),
-          ggplot2::aes(yintercept = yintercept),
-          inherit.aes = FALSE,
-          linetype = "dashed",
-          colour = "grey40"
-        )
-    }
-  } else {
-    recorder_periodicity_plot <- make_placeholder_plot(
-      title_text = sprintf("temporal periodicity of identification rates: %s", recorder_id),
-      subtitle_text = plot_subtitle,
-      body_text = "not enough variation or time bins are currently available\nfor recorder-specific autocorrelation or spectral analysis."
+  recorder_temporal_diagnostics$facet_label <- paste(
+    recorder_temporal_diagnostics$metric_name,
+    recorder_temporal_diagnostics$panel,
+    sep = "\n"
+  )
+  recorder_temporal_peaks$facet_label <- paste(
+    recorder_temporal_peaks$metric_name,
+    "spectral density",
+    sep = "\n"
+  )
+  recorder_periodicity_plot <- build_temporal_diagnostics_plot(
+    diagnostics_df = recorder_temporal_diagnostics,
+    peaks_df = recorder_temporal_peaks,
+    title_text = sprintf("temporal periodicity diagnostics: %s", recorder_id),
+    subtitle_text = plot_subtitle,
+    facet_column = "facet_label",
+    ncol = 2,
+    placeholder_text = paste(
+      "not enough variation or time bins are currently available",
+      "for recorder-specific autocorrelation, PACF, or spectral analysis.",
+      sep = "\n"
     )
-  }
+  )
 
   ggplot2::ggsave(file.path(recorder_dir, "birdnet_identifications_over_time.png"), recorder_time_series_plot, width = 12, height = 7, dpi = 150)
   ggplot2::ggsave(file.path(recorder_dir, "birdnet_cumulative_new_species.png"), recorder_cumulative_plot, width = 12, height = 7, dpi = 150)
@@ -1886,7 +2240,7 @@ for (recorder_id in recorder_ids) {
   ggplot2::ggsave(file.path(recorder_dir, "birdnet_identifications_by_species_by_month.png"), recorder_species_by_month_plot, width = 16, height = 12, dpi = 150)
   ggplot2::ggsave(file.path(recorder_dir, "birdnet_monthly_diversity_metrics.png"), recorder_diversity_plot, width = 14, height = 10, dpi = 150)
   ggplot2::ggsave(file.path(recorder_dir, "birdnet_top_10_species_detections_through_time.png"), recorder_top_species_plot, width = 14, height = 8, dpi = 150)
-  ggplot2::ggsave(file.path(recorder_dir, "birdnet_periodicity.png"), recorder_periodicity_plot, width = 12, height = 9, dpi = 150)
+  ggplot2::ggsave(file.path(recorder_dir, "birdnet_periodicity.png"), recorder_periodicity_plot, width = 15, height = 11, dpi = 150)
 }
 
 message(sprintf("Analysis complete. Outputs written to: %s", output_dir))

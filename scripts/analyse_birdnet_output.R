@@ -590,6 +590,7 @@ build_light_phase_schedule <- function(local_date, latitude, longitude, timezone
     interval_df <- data.frame(
       light_phase = solar_times$fallback_phase[[1]],
       plot_phase = solar_times$fallback_phase[[1]],
+      plot_phase_key = solar_times$fallback_phase[[1]],
       interval_start = day_start,
       interval_end = next_day,
       stringsAsFactors = FALSE
@@ -598,6 +599,7 @@ build_light_phase_schedule <- function(local_date, latitude, longitude, timezone
     interval_df <- data.frame(
       light_phase = c("night", "twilight", "daylight", "twilight", "night"),
       plot_phase = c("night", "morning_twilight", "daylight", "evening_twilight", "night"),
+      plot_phase_key = c("night_pre_dawn", "morning_twilight", "daylight", "evening_twilight", "night_post_dusk"),
       interval_start = c(day_start, solar_times$civil_dawn[[1]], solar_times$sunrise[[1]], solar_times$sunset[[1]], solar_times$civil_dusk[[1]]),
       interval_end = c(solar_times$civil_dawn[[1]], solar_times$sunrise[[1]], solar_times$sunset[[1]], solar_times$civil_dusk[[1]], next_day),
       stringsAsFactors = FALSE
@@ -752,7 +754,7 @@ build_plot_light_phase_bands <- function(reference_locations,
     })
   )
 
-  band_rows <- unique(band_rows[, c("recorder_id", "plot_phase", "interval_start", "interval_end", "local_date"), drop = FALSE])
+  band_rows <- unique(band_rows[, c("recorder_id", "plot_phase", "plot_phase_key", "interval_start", "interval_end", "local_date"), drop = FALSE])
   band_rows$plot_phase <- factor(
     band_rows$plot_phase,
     levels = c("morning_twilight", "daylight", "evening_twilight", "night")
@@ -769,7 +771,8 @@ build_plot_light_phase_bands <- function(reference_locations,
     ),
     by = list(
       local_date = band_rows$local_date,
-      plot_phase = band_rows$plot_phase
+      plot_phase = band_rows$plot_phase,
+      plot_phase_key = band_rows$plot_phase_key
     ),
     FUN = median
   ) |>

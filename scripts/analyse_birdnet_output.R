@@ -578,6 +578,74 @@ build_periodicity_frames <- function(time_series_summary, bin_minutes, periodici
   do.call(rbind, periodicity_frames)
 }
 
+build_top_species_time_series <- function(detections_subset, bin_minutes, top_n = 10L, timezone) {
+  if (nrow(detections_subset) == 0) {
+    return(data.frame(
+      time_bin = as.POSIXct(character()),
+      scientific_name = character(),
+      common_name = character(),
+      species_label = character(),
+      identification_count = integer(),
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  species_totals <- aggregate(
+    list(total_detections = rep(1L, nrow(detections_subset))),
+    by = list(
+      scientific_name = detections_subset$scientific_name,
+      common_name = detections_subset$common_name
+    ),
+    FUN = sum
+  )
+  species_totals$species_label <- paste0(species_totals$common_name, " (", species_totals$scientific_name, ")")
+  species_totals <- species_totals[order(-species_totals$total_detections, species_totals$species_label), , drop = FALSE]
+  species_totals <- species_totals[seq_len(min(top_n, nrow(species_totals))), , drop = FALSE]
+
+  top_species_labels <- species_totals$species_label
+  detections_subset$species_label <- paste0(detections_subset$common_name, " (", detections_subset$scientific_name, ")")
+  detections_subset <- detections_subset[detections_subset$species_label %in% top_species_labels, , drop = FALSE]
+  detections_subset$time_bin <- floor_to_bin(
+    detections_subset$date_time,
+    bin_minutes = bin_minutes,
+    timezone = timezone
+  )
+
+  time_grid <- build_complete_time_grid(
+    start_time = min(detections_subset$date_time),
+    end_time = max(detections_subset$date_time),
+    bin_minutes = bin_minutes,
+    timezone = timezone
+  )
+
+  species_time_series <- aggregate(
+    list(identification_count = rep(1L, nrow(detections_subset))),
+    by = list(
+      time_bin = detections_subset$time_bin,
+      scientific_name = detections_subset$scientific_name,
+      common_name = detections_subset$common_name,
+      species_label = detections_subset$species_label
+    ),
+    FUN = sum
+  )
+
+  species_lookup <- species_totals[, c("scientific_name", "common_name", "species_label"), drop = FALSE]
+  species_time_grid <- merge(
+    data.frame(time_bin = time_grid),
+    species_lookup,
+    by = NULL
+  )
+  species_time_series <- merge(
+    species_time_grid,
+    species_time_series,
+    by = c("time_bin", "scientific_name", "common_name", "species_label"),
+    all.x = TRUE
+  )
+  species_time_series$identification_count[is.na(species_time_series$identification_count)] <- 0L
+  species_time_series$species_label <- factor(species_time_series$species_label, levels = species_totals$species_label)
+  species_time_series
+}
+
 write_analysis_summary <- function(summary_txt,
                                    generated_at,
                                    summary_root,
@@ -654,6 +722,7 @@ summary_root <- normalizePath(file.path(repo_root, "out"), mustWork = TRUE)
 output_root <- file.path(summary_root, "analysis")
 analysis_timezone <- "Australia/Adelaide"
 bin_minutes <- 60
+top_species_time_bin_minutes <- 24 * 60
 min_confidence <- 0.05
 periodicity_max_lag_bins <- 48L
 show_plots_in_session <- TRUE
@@ -661,6 +730,11 @@ show_plots_in_session <- TRUE
 
 if (!is.numeric(bin_minutes) || length(bin_minutes) != 1 || is.na(bin_minutes) || bin_minutes <= 0) {
   stop("bin_minutes must be a single positive number")
+}
+
+if (!is.numeric(top_species_time_bin_minutes) || length(top_species_time_bin_minutes) != 1 ||
+    is.na(top_species_time_bin_minutes) || top_species_time_bin_minutes <= 0) {
+  stop("top_species_time_bin_minutes must be a single positive number")
 }
 
 if (!is.numeric(min_confidence) || length(min_confidence) != 1 || is.na(min_confidence) ||
@@ -678,6 +752,7 @@ if (!is.logical(show_plots_in_session) || length(show_plots_in_session) != 1 || 
 }
 
 bin_minutes <- as.numeric(bin_minutes)
+top_species_time_bin_minutes <- as.numeric(top_species_time_bin_minutes)
 min_confidence <- as.numeric(min_confidence)
 periodicity_max_lag_bins <- as.integer(periodicity_max_lag_bins)
 
@@ -933,6 +1008,13 @@ monthly_diversity_long$metric_name <- factor(
   levels = c("Hill number (q = 1)", "Hill number (q = 2)", "Shannon index", "Simpson index")
 )
 
+top_species_time_series <- build_top_species_time_series(
+  filtered_detections,
+  bin_minutes = top_species_time_bin_minutes,
+  top_n = 10L,
+  timezone = analysis_timezone
+)
+
 overall_monthly_diversity_summary <- build_monthly_diversity_summary(
   transform(filtered_detections, recorder_id = "ALL_RECORDERS"),
   analysis_timezone
@@ -954,6 +1036,21 @@ time_series_by_recorder <- do.call(
     subset_time_series <- build_time_series_summary_for_subset(subset_detections, bin_minutes, analysis_timezone)
     subset_time_series$recorder_id <- recorder_id
     subset_time_series
+  })
+)
+
+top_species_time_series_by_recorder <- do.call(
+  rbind,
+  lapply(recorder_ids, function(recorder_id) {
+    subset_detections <- filtered_detections[filtered_detections$recorder_id == recorder_id, , drop = FALSE]
+    subset_top_species <- build_top_species_time_series(
+      subset_detections,
+      bin_minutes = top_species_time_bin_minutes,
+      top_n = 10L,
+      timezone = analysis_timezone
+    )
+    subset_top_species$recorder_id <- recorder_id
+    subset_top_species
   })
 )
 
@@ -1088,6 +1185,8 @@ input_files_csv <- file.path(output_dir, "birdnet_analysis_input_files.csv")
 filtered_detections_csv <- file.path(output_dir, "birdnet_analysis_filtered_detections.csv")
 time_series_csv <- file.path(output_dir, "birdnet_identifications_by_time_bin.csv")
 time_series_by_recorder_csv <- file.path(output_dir, "birdnet_identifications_by_time_bin_by_recorder.csv")
+top_species_time_series_csv <- file.path(output_dir, "birdnet_top_10_species_detections_through_time.csv")
+top_species_time_series_by_recorder_csv <- file.path(output_dir, "birdnet_top_10_species_detections_through_time_by_recorder.csv")
 cumulative_species_csv <- file.path(output_dir, "birdnet_cumulative_new_species_by_time_bin.csv")
 cumulative_species_by_recorder_csv <- file.path(output_dir, "birdnet_cumulative_new_species_by_time_bin_by_recorder.csv")
 species_counts_csv <- file.path(output_dir, "birdnet_identifications_by_species.csv")
@@ -1104,6 +1203,8 @@ write.csv(file_status, input_files_csv, row.names = FALSE)
 write.csv(filtered_detections, filtered_detections_csv, row.names = FALSE)
 write.csv(time_series_summary, time_series_csv, row.names = FALSE)
 write.csv(time_series_by_recorder, time_series_by_recorder_csv, row.names = FALSE)
+write.csv(top_species_time_series, top_species_time_series_csv, row.names = FALSE)
+write.csv(top_species_time_series_by_recorder, top_species_time_series_by_recorder_csv, row.names = FALSE)
 write.csv(cumulative_new_species, cumulative_species_csv, row.names = FALSE)
 write.csv(cumulative_new_species_by_recorder, cumulative_species_by_recorder_csv, row.names = FALSE)
 write.csv(species_counts, species_counts_csv, row.names = FALSE)
@@ -1233,6 +1334,26 @@ monthly_diversity_plot <- ggplot2::ggplot(
   ggplot2::scale_x_date(date_labels = "%Y-%m") +
   analysis_plot_theme()
 
+top_species_plot <- ggplot2::ggplot(
+  top_species_time_series,
+  ggplot2::aes(x = time_bin, y = identification_count, colour = species_label, group = species_label)
+) +
+  ggplot2::geom_line(linewidth = 0.9) +
+  ggplot2::geom_point(size = 1.5) +
+  ggplot2::scale_colour_discrete(
+    labels = function(x) {
+      parse(text = unname(species_label_plotmath_lookup[as.character(x)]))
+    }
+  ) +
+  ggplot2::labs(
+    title = "detections through time for the 10 most detected species",
+    subtitle = sprintf("bin size: %s hours | minimum confidence: %.3f", round(top_species_time_bin_minutes / 60, 2), min_confidence),
+    x = "time bin",
+    y = "number of detections",
+    colour = "species"
+  ) +
+  analysis_plot_theme()
+
 time_series_by_recorder_plot <- ggplot2::ggplot(
   time_series_by_recorder,
   ggplot2::aes(x = time_bin, y = identification_count)
@@ -1329,7 +1450,11 @@ monthly_diversity_by_recorder_plot <- ggplot2::ggplot(
 ) +
   ggplot2::geom_line(linewidth = 0.9, colour = "steelblue4") +
   ggplot2::geom_point(size = 1.8, colour = "steelblue4") +
-  ggplot2::facet_grid(recorder_id ~ metric_name, scales = "free_y") +
+  ggplot2::facet_wrap(
+    ~paste(recorder_id, metric_name, sep = "\n"),
+    scales = "free_y",
+    ncol = 2
+  ) +
   ggplot2::labs(
     title = "monthly diversity metrics by recorder",
     subtitle = "detections treated as relative abundance for Shannon, Simpson, and Hill numbers",
@@ -1337,6 +1462,27 @@ monthly_diversity_by_recorder_plot <- ggplot2::ggplot(
     y = "metric value"
   ) +
   ggplot2::scale_x_date(date_labels = "%Y-%m") +
+  analysis_plot_theme()
+
+top_species_by_recorder_plot <- ggplot2::ggplot(
+  top_species_time_series_by_recorder,
+  ggplot2::aes(x = time_bin, y = identification_count, colour = species_label, group = species_label)
+) +
+  ggplot2::geom_line(linewidth = 0.9) +
+  ggplot2::geom_point(size = 1.3) +
+  ggplot2::facet_grid(recorder_id ~ ., scales = "free_y") +
+  ggplot2::scale_colour_discrete(
+    labels = function(x) {
+      parse(text = unname(species_label_plotmath_lookup[as.character(x)]))
+    }
+  ) +
+  ggplot2::labs(
+    title = "detections through time for the 10 most detected species by recorder",
+    subtitle = sprintf("bin size: %s hours | minimum confidence: %.3f", round(top_species_time_bin_minutes / 60, 2), min_confidence),
+    x = "time bin",
+    y = "number of detections",
+    colour = "species"
+  ) +
   analysis_plot_theme()
 
 periodicity_frames <- list()
@@ -1433,7 +1579,9 @@ if (isTRUE(show_plots_in_session) && interactive()) {
   print(species_counts_plot)
   print(species_counts_by_month_plot)
   print(monthly_diversity_plot)
+  print(top_species_plot)
   print(time_series_by_recorder_plot)
+  print(top_species_by_recorder_plot)
   print(cumulative_species_by_recorder_plot)
   print(species_counts_by_recorder_plot)
   print(species_counts_by_month_by_recorder_plot)
@@ -1478,10 +1626,24 @@ ggplot2::ggsave(
   dpi = 150
 )
 ggplot2::ggsave(
+  filename = file.path(output_dir, "birdnet_top_10_species_detections_through_time.png"),
+  plot = top_species_plot,
+  width = 14,
+  height = 8,
+  dpi = 150
+)
+ggplot2::ggsave(
   filename = file.path(output_dir, "birdnet_identifications_over_time_by_recorder.png"),
   plot = time_series_by_recorder_plot,
   width = 14,
   height = max(7, 3 * length(recorder_ids)),
+  dpi = 150
+)
+ggplot2::ggsave(
+  filename = file.path(output_dir, "birdnet_top_10_species_detections_through_time_by_recorder.png"),
+  plot = top_species_by_recorder_plot,
+  width = 15,
+  height = max(8, 3 * length(recorder_ids)),
   dpi = 150
 )
 ggplot2::ggsave(
@@ -1557,6 +1719,14 @@ for (recorder_id in recorder_ids) {
 
   recorder_diversity_long <- monthly_diversity_long[monthly_diversity_long$recorder_id == recorder_id, , drop = FALSE]
   recorder_periodicity <- periodicity_by_recorder[periodicity_by_recorder$recorder_id == recorder_id, , drop = FALSE]
+  recorder_top_species <- top_species_time_series_by_recorder[
+    top_species_time_series_by_recorder$recorder_id == recorder_id,
+    ,
+    drop = FALSE
+  ]
+  recorder_top_species_levels <- unique(as.character(recorder_top_species$species_label))
+  recorder_top_species_lookup <- species_label_plotmath_lookup[recorder_top_species_levels]
+  recorder_top_species$species_label <- factor(as.character(recorder_top_species$species_label), levels = recorder_top_species_levels)
 
   recorder_time_series_plot <- ggplot2::ggplot(
     recorder_time_series,
@@ -1657,6 +1827,26 @@ for (recorder_id in recorder_ids) {
     ggplot2::scale_x_date(date_labels = "%Y-%m") +
     analysis_plot_theme()
 
+  recorder_top_species_plot <- ggplot2::ggplot(
+    recorder_top_species,
+    ggplot2::aes(x = time_bin, y = identification_count, colour = species_label, group = species_label)
+  ) +
+    ggplot2::geom_line(linewidth = 0.9) +
+    ggplot2::geom_point(size = 1.5) +
+    ggplot2::scale_colour_discrete(
+      labels = function(x) {
+        parse(text = unname(recorder_top_species_lookup[as.character(x)]))
+      }
+    ) +
+    ggplot2::labs(
+      title = sprintf("detections through time for the 10 most detected species: %s", recorder_id),
+      subtitle = sprintf("bin size: %s hours | minimum confidence: %.3f", round(top_species_time_bin_minutes / 60, 2), min_confidence),
+      x = "time bin",
+      y = "number of detections",
+      colour = "species"
+    ) +
+    analysis_plot_theme()
+
   if (nrow(recorder_periodicity) > 0) {
     recorder_periodicity_plot <- ggplot2::ggplot(
       recorder_periodicity,
@@ -1695,6 +1885,7 @@ for (recorder_id in recorder_ids) {
   ggplot2::ggsave(file.path(recorder_dir, "birdnet_identifications_by_species.png"), recorder_species_plot, width = 13, height = 10, dpi = 150)
   ggplot2::ggsave(file.path(recorder_dir, "birdnet_identifications_by_species_by_month.png"), recorder_species_by_month_plot, width = 16, height = 12, dpi = 150)
   ggplot2::ggsave(file.path(recorder_dir, "birdnet_monthly_diversity_metrics.png"), recorder_diversity_plot, width = 14, height = 10, dpi = 150)
+  ggplot2::ggsave(file.path(recorder_dir, "birdnet_top_10_species_detections_through_time.png"), recorder_top_species_plot, width = 14, height = 8, dpi = 150)
   ggplot2::ggsave(file.path(recorder_dir, "birdnet_periodicity.png"), recorder_periodicity_plot, width = 12, height = 9, dpi = 150)
 }
 

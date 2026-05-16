@@ -162,6 +162,7 @@ Edit the user-defined settings directly near the top of the script:
 - `output_root`
 - `analysis_timezone`
 - `bin_minutes`
+- `top_species_time_bin_minutes`
 - `min_confidence`
 - `periodicity_max_lag_bins`
 - `show_plots_in_session`
@@ -255,6 +256,12 @@ The analysis workflow writes:
 - `birdnet_identifications_by_time_bin_by_recorder.csv`  
   identifications per time bin for each recorder separately
 
+- `birdnet_top_10_species_detections_through_time.csv`  
+  detections through time for the 10 most detected species across all currently analysed recorders
+
+- `birdnet_top_10_species_detections_through_time_by_recorder.csv`  
+  detections through time for the 10 most detected species within each recorder
+
 - `birdnet_cumulative_new_species_by_time_bin.csv`  
   newly detected species per time bin and cumulative species richness through time
 
@@ -289,6 +296,7 @@ The analysis workflow writes:
   recorder-specific autocorrelation and spectral-periodicity values used by the recorder comparison figure
 
 - `birdnet_identifications_over_time.png`
+- `birdnet_top_10_species_detections_through_time.png`
 - `birdnet_cumulative_new_species.png`
 - `birdnet_identifications_by_species.png`
 - `birdnet_identifications_by_species_by_month.png`
@@ -297,6 +305,7 @@ The analysis workflow writes:
   overall figures combining all recorders currently present in the analysis
 
 - `birdnet_identifications_over_time_by_recorder.png`
+- `birdnet_top_10_species_detections_through_time_by_recorder.png`
 - `birdnet_cumulative_new_species_by_recorder.png`
 - `birdnet_identifications_by_species_by_recorder.png`
 - `birdnet_identifications_by_species_by_month_by_recorder.png`
@@ -310,6 +319,8 @@ The analysis workflow writes:
 In the species-frequency plots, the identification axis is shown on a log<sub>10</sub> scale, and common names are displayed in lowercase except where proper nouns remain capitalised. Latin names are italicised in the species-axis labels.
 The root-level analysis figures are the combined overall results across all recorders currently present in `out/`. Additional recorder-comparison figures are written as multi-panel plots, and recorder-specific figures are written into the `recorders/` subdirectory as each recorder becomes available.
 Monthly diversity metrics treat the number of detections per species as the abundance proxy for Shannon, Simpson, and Hill-number calculations, and are produced as overall combined figures, recorder-specific figures, and recorder-comparison figures.
+The top-species time-series plots default to 24-hour bins through `top_species_time_bin_minutes <- 24 * 60`, but that bin size can be changed directly in `scripts/analyse_birdnet_output.R`.
+In the recorder-comparison diversity figure, each recorder-by-metric panel now uses its own y-axis range so Shannon, Simpson, and Hill-number panels are scaled to their local maxima.
 
 ### Diversity-metric calculations
 

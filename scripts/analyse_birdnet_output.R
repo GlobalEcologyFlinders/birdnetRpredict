@@ -589,6 +589,7 @@ build_light_phase_schedule <- function(local_date, latitude, longitude, timezone
   if (!is.na(solar_times$fallback_phase[[1]])) {
     interval_df <- data.frame(
       light_phase = solar_times$fallback_phase[[1]],
+      plot_phase = solar_times$fallback_phase[[1]],
       interval_start = day_start,
       interval_end = next_day,
       stringsAsFactors = FALSE
@@ -596,6 +597,7 @@ build_light_phase_schedule <- function(local_date, latitude, longitude, timezone
   } else {
     interval_df <- data.frame(
       light_phase = c("night", "twilight", "daylight", "twilight", "night"),
+      plot_phase = c("night", "morning_twilight", "daylight", "evening_twilight", "night"),
       interval_start = c(day_start, solar_times$civil_dawn[[1]], solar_times$sunrise[[1]], solar_times$sunset[[1]], solar_times$civil_dusk[[1]]),
       interval_end = c(solar_times$civil_dawn[[1]], solar_times$sunrise[[1]], solar_times$sunset[[1]], solar_times$civil_dusk[[1]], next_day),
       stringsAsFactors = FALSE
@@ -634,6 +636,7 @@ build_light_phase_lookup <- function(local_dates, latitudes, longitudes, timezon
       ),
       schedules = data.frame(
         light_phase = character(),
+        plot_phase = character(),
         interval_start = as.POSIXct(character()),
         interval_end = as.POSIXct(character()),
         local_date = as.Date(character()),
@@ -668,6 +671,132 @@ build_light_phase_lookup <- function(local_dates, latitudes, longitudes, timezon
   )
 
   list(solar_times = solar_times, schedules = schedules)
+}
+
+phase_band_palette <- c(
+  morning_twilight = "deeppink2",
+  daylight = "gold",
+  evening_twilight = "deeppink2",
+  night = "midnightblue"
+)
+
+build_recorder_reference_locations <- function(summary_metadata) {
+  valid_metadata <- summary_metadata[
+    !is.na(summary_metadata$recording_latitude) &
+      !is.na(summary_metadata$recording_longitude),
+    c("recorder_id", "recording_latitude", "recording_longitude"),
+    drop = FALSE
+  ]
+
+  if (nrow(valid_metadata) == 0) {
+    return(data.frame(
+      recorder_id = character(),
+      recording_latitude = numeric(),
+      recording_longitude = numeric(),
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  do.call(
+    rbind,
+    lapply(split(valid_metadata, valid_metadata$recorder_id), function(group_df) {
+      data.frame(
+        recorder_id = as.character(group_df$recorder_id[[1]]),
+        recording_latitude = stats::median(group_df$recording_latitude, na.rm = TRUE),
+        recording_longitude = stats::median(group_df$recording_longitude, na.rm = TRUE),
+        stringsAsFactors = FALSE
+      )
+    })
+  )
+}
+
+build_plot_light_phase_bands <- function(reference_locations,
+                                         local_dates,
+                                         timezone,
+                                         aggregate_across_locations = FALSE) {
+  reference_locations <- reference_locations[
+    !is.na(reference_locations$recording_latitude) &
+      !is.na(reference_locations$recording_longitude),
+    ,
+    drop = FALSE
+  ]
+  local_dates <- sort(unique(as.Date(local_dates)))
+  local_dates <- local_dates[!is.na(local_dates)]
+
+  if (nrow(reference_locations) == 0 || length(local_dates) == 0) {
+    return(data.frame(
+      recorder_id = character(),
+      plot_phase = character(),
+      interval_start = as.POSIXct(character(), tz = timezone),
+      interval_end = as.POSIXct(character(), tz = timezone),
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  band_rows <- do.call(
+    rbind,
+    lapply(seq_len(nrow(reference_locations)), function(index) {
+      do.call(
+        rbind,
+        lapply(local_dates, function(local_date) {
+          schedule_df <- build_light_phase_schedule(
+            local_date = local_date,
+            latitude = reference_locations$recording_latitude[[index]],
+            longitude = reference_locations$recording_longitude[[index]],
+            timezone = timezone
+          )
+          schedule_df$recorder_id <- reference_locations$recorder_id[[index]]
+          schedule_df
+        })
+      )
+    })
+  )
+
+  band_rows <- unique(band_rows[, c("recorder_id", "plot_phase", "interval_start", "interval_end", "local_date"), drop = FALSE])
+  band_rows$plot_phase <- factor(
+    band_rows$plot_phase,
+    levels = c("morning_twilight", "daylight", "evening_twilight", "night")
+  )
+
+  if (!isTRUE(aggregate_across_locations)) {
+    return(band_rows)
+  }
+
+  aggregate(
+    cbind(
+      interval_start_num = as.numeric(band_rows$interval_start),
+      interval_end_num = as.numeric(band_rows$interval_end)
+    ),
+    by = list(
+      local_date = band_rows$local_date,
+      plot_phase = band_rows$plot_phase
+    ),
+    FUN = median
+  ) |>
+    transform(
+      interval_start = as.POSIXct(interval_start_num, origin = "1970-01-01", tz = timezone),
+      interval_end = as.POSIXct(interval_end_num, origin = "1970-01-01", tz = timezone)
+    ) |>
+    subset(select = c("plot_phase", "interval_start", "interval_end"))
+}
+
+light_phase_band_layers <- function(band_df, alpha = 0.14, ymin = -Inf, ymax = Inf) {
+  list(
+    ggplot2::geom_rect(
+      data = band_df,
+      ggplot2::aes(xmin = interval_start, xmax = interval_end, fill = plot_phase),
+      inherit.aes = FALSE,
+      alpha = alpha,
+      colour = NA,
+      ymin = ymin,
+      ymax = ymax
+    ),
+    ggplot2::scale_fill_manual(
+      values = phase_band_palette,
+      guide = "none",
+      drop = FALSE
+    )
+  )
 }
 
 classify_light_phase <- function(date_time, solar_time_row) {
@@ -2581,12 +2710,25 @@ time_series_plot_subtitle <- paste0(
   sprintf(" | red line = %.3g-day running mean", rolling_mean_window_days)
 )
 time_series_plot_linear_subtitle <- plot_subtitle
+recorder_reference_locations <- build_recorder_reference_locations(summary_file_metadata)
+overall_light_phase_bands <- build_plot_light_phase_bands(
+  reference_locations = recorder_reference_locations,
+  local_dates = as.Date(time_series_summary$time_bin, tz = analysis_timezone),
+  timezone = analysis_timezone,
+  aggregate_across_locations = TRUE
+)
+by_recorder_light_phase_bands <- build_plot_light_phase_bands(
+  reference_locations = recorder_reference_locations,
+  local_dates = as.Date(time_series_summary$time_bin, tz = analysis_timezone),
+  timezone = analysis_timezone,
+  aggregate_across_locations = FALSE
+)
 
 time_series_plot <- ggplot2::ggplot(
   time_series_summary,
   ggplot2::aes(x = time_bin, y = identification_count_plot)
 ) +
-  ggplot2::geom_col(fill = "steelblue", alpha = 0.5, width = bin_minutes * 60 * 0.9, na.rm = TRUE) +
+  ggplot2::geom_col(fill = "black", alpha = 0.5, width = bin_minutes * 60 * 0.9, na.rm = TRUE) +
   ggplot2::geom_line(
     ggplot2::aes(y = identification_count_running_mean_plot),
     colour = "firebrick2",
@@ -2607,7 +2749,8 @@ time_series_plot_linear <- ggplot2::ggplot(
   time_series_summary,
   ggplot2::aes(x = time_bin, y = identification_count)
 ) +
-  ggplot2::geom_col(fill = "steelblue", alpha = 0.5, width = bin_minutes * 60 * 0.9) +
+  light_phase_band_layers(overall_light_phase_bands) +
+  ggplot2::geom_col(fill = "black", alpha = 0.5, width = bin_minutes * 60 * 0.9) +
   ggplot2::labs(
     title = "BirdNET identifications over time",
     subtitle = time_series_plot_linear_subtitle,
@@ -2733,7 +2876,7 @@ time_series_by_recorder_plot <- ggplot2::ggplot(
   time_series_by_recorder,
   ggplot2::aes(x = time_bin, y = identification_count_plot)
 ) +
-  ggplot2::geom_col(fill = "steelblue", alpha = 0.5, width = bin_minutes * 60 * 0.9, na.rm = TRUE) +
+  ggplot2::geom_col(fill = "black", alpha = 0.5, width = bin_minutes * 60 * 0.9, na.rm = TRUE) +
   ggplot2::geom_line(
     ggplot2::aes(y = identification_count_running_mean_plot),
     colour = "firebrick2",
@@ -2755,7 +2898,8 @@ time_series_by_recorder_plot_linear <- ggplot2::ggplot(
   time_series_by_recorder,
   ggplot2::aes(x = time_bin, y = identification_count)
 ) +
-  ggplot2::geom_col(fill = "steelblue", alpha = 0.5, width = bin_minutes * 60 * 0.9) +
+  light_phase_band_layers(by_recorder_light_phase_bands) +
+  ggplot2::geom_col(fill = "black", alpha = 0.5, width = bin_minutes * 60 * 0.9) +
   ggplot2::facet_grid(recorder_id ~ ., scales = "free_y") +
   ggplot2::labs(
     title = "BirdNET identifications over time by recorder",
@@ -3237,12 +3381,30 @@ for (recorder_id in recorder_ids) {
   recorder_top_species_label_parser <- build_species_label_parser(recorder_top_species_lookup)
   recorder_top_species_style <- top_species_style_values(recorder_top_species_levels)
   recorder_top_species$species_label <- factor(as.character(recorder_top_species$species_label), levels = recorder_top_species_levels)
+  recorder_light_phase_bands <- by_recorder_light_phase_bands[
+    by_recorder_light_phase_bands$recorder_id == recorder_id,
+    ,
+    drop = FALSE
+  ]
+  if (nrow(recorder_light_phase_bands) == 0) {
+    recorder_reference_location <- recorder_reference_locations[
+      recorder_reference_locations$recorder_id == recorder_id,
+      ,
+      drop = FALSE
+    ]
+    recorder_light_phase_bands <- build_plot_light_phase_bands(
+      reference_locations = recorder_reference_location,
+      local_dates = as.Date(recorder_time_series$time_bin, tz = analysis_timezone),
+      timezone = analysis_timezone,
+      aggregate_across_locations = FALSE
+    )
+  }
 
   recorder_time_series_plot <- ggplot2::ggplot(
     recorder_time_series,
     ggplot2::aes(x = time_bin, y = identification_count_plot)
   ) +
-    ggplot2::geom_col(fill = "steelblue", width = bin_minutes * 60 * 0.9, na.rm = TRUE) +
+    ggplot2::geom_col(fill = "black", width = bin_minutes * 60 * 0.9, na.rm = TRUE) +
     ggplot2::geom_line(
       ggplot2::aes(y = identification_count_running_mean_plot),
       colour = "firebrick2",
@@ -3263,7 +3425,8 @@ for (recorder_id in recorder_ids) {
     recorder_time_series,
     ggplot2::aes(x = time_bin, y = identification_count)
   ) +
-    ggplot2::geom_col(fill = "steelblue", width = bin_minutes * 60 * 0.9) +
+    light_phase_band_layers(recorder_light_phase_bands) +
+    ggplot2::geom_col(fill = "black", width = bin_minutes * 60 * 0.9) +
     ggplot2::labs(
       title = sprintf("BirdNET identifications over time: %s", recorder_id),
       subtitle = time_series_plot_linear_subtitle,

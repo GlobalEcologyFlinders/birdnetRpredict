@@ -2,7 +2,7 @@
 analysis_timezone <- "Australia/Adelaide"
 bin_minutes <- 60
 top_species_time_bin_minutes <- 24 * 60
-min_confidence <- 0.05
+min_confidence <- 0.1
 periodicity_max_lag_bins <- 48L
 show_plots_in_session <- TRUE
 # -------------------------------------------------------------------------

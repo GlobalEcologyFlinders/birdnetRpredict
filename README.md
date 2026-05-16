@@ -2,7 +2,7 @@
 
 In partnership with the <a href="http://ngarrindjeri.com.au/">Ngarrindjeri Aboriginal Corporation</a> and the Raukkan Rangers, Flinders University (<a href="http://globalecologyflinders.com/">Global Ecology Laboratory</a>) under the auspices of the Australian Research Council <a href="http://ciehf.au">Centre of Excellence for Indigenous and Environmental Histories and Futures</a> (CIEHF) have set up an initial array of 5 passive acoustic recorders to document the change in bird diversity in recently restored wetlands within the <a href="https://www.environment.sa.gov.au/topics/water-and-river-murray/projects-plans-security-and-legislation/water-projects/coorong/current-projects/on-ground-works/ogw-teringie">Teringie Wetlands</a> complex in South Australia. We are comparing these records to existing wetland complexes and control saltponds devoid of most birdlife (control). These data belong to the Ngarrindjeri Nation.
 
-The audio-file repository is available at <a href="https://api.ecosounds.org/projects/1281">EcoSounds</a> (but not publicly available).
+The audio-file repository is available at <a href="https://api.ecosounds.org/projects/1281">EcoSounds</a> (but not currently open-access).
 
 ## Workflow
 
@@ -82,7 +82,7 @@ macOS sidecar entries such as `._*.flac` and `__MACOSX/` metadata are skipped du
 
 This script is intended to work while archive processing is still incomplete. You can rerun it at any time and it will analyse whatever summary CSVs currently exist in `out/`.
 
-## How coordinates and date are determined
+## Determining coordinates and date
 
 The pipeline first tries to parse metadata from the audio file name.
 

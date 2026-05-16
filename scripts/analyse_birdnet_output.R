@@ -2731,7 +2731,7 @@ time_series_plot <- ggplot2::ggplot(
   time_series_summary,
   ggplot2::aes(x = time_bin, y = identification_count_plot)
 ) +
-  ggplot2::geom_col(fill = "black", alpha = 0.5, width = bin_minutes * 60 * 0.9, na.rm = TRUE) +
+  ggplot2::geom_col(fill = "steelblue", alpha = 0.5, width = bin_minutes * 60 * 0.9, na.rm = TRUE) +
   ggplot2::geom_line(
     ggplot2::aes(y = identification_count_running_mean_plot),
     colour = "firebrick2",
@@ -2879,7 +2879,7 @@ time_series_by_recorder_plot <- ggplot2::ggplot(
   time_series_by_recorder,
   ggplot2::aes(x = time_bin, y = identification_count_plot)
 ) +
-  ggplot2::geom_col(fill = "black", alpha = 0.5, width = bin_minutes * 60 * 0.9, na.rm = TRUE) +
+  ggplot2::geom_col(fill = "steelblue", alpha = 0.5, width = bin_minutes * 60 * 0.9, na.rm = TRUE) +
   ggplot2::geom_line(
     ggplot2::aes(y = identification_count_running_mean_plot),
     colour = "firebrick2",

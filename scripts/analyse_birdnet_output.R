@@ -2,7 +2,7 @@
 analysis_timezone <- "Australia/Adelaide"
 bin_minutes <- 60
 top_species_time_bin_minutes <- 24 * 60
-rolling_mean_window_days <- 7
+rolling_mean_window_days <- 30
 min_confidence <- 0.1
 periodicity_max_lag_bins <- 48L
 show_plots_in_session <- TRUE
@@ -1685,6 +1685,7 @@ time_series_plot_subtitle <- paste0(
   plot_subtitle,
   sprintf(" | red line = %.3g-day running mean", rolling_mean_window_days)
 )
+time_series_plot_linear_subtitle <- plot_subtitle
 
 time_series_plot <- ggplot2::ggplot(
   time_series_summary,
@@ -1703,6 +1704,19 @@ time_series_plot <- ggplot2::ggplot(
     subtitle = time_series_plot_subtitle,
     x = "time bin",
     y = expression("identifications per bin (" * log[10] * " scale)")
+  ) +
+  analysis_plot_theme()
+
+time_series_plot_linear <- ggplot2::ggplot(
+  time_series_summary,
+  ggplot2::aes(x = time_bin, y = identification_count)
+) +
+  ggplot2::geom_col(fill = "steelblue", width = bin_minutes * 60 * 0.9) +
+  ggplot2::labs(
+    title = "BirdNET identifications over time",
+    subtitle = time_series_plot_linear_subtitle,
+    x = "time bin",
+    y = "identifications per bin"
   ) +
   analysis_plot_theme()
 
@@ -1832,6 +1846,20 @@ time_series_by_recorder_plot <- ggplot2::ggplot(
     subtitle = time_series_plot_subtitle,
     x = "time bin",
     y = expression("identifications per bin (" * log[10] * " scale)")
+  ) +
+  analysis_plot_theme()
+
+time_series_by_recorder_plot_linear <- ggplot2::ggplot(
+  time_series_by_recorder,
+  ggplot2::aes(x = time_bin, y = identification_count)
+) +
+  ggplot2::geom_col(fill = "steelblue", width = bin_minutes * 60 * 0.9) +
+  ggplot2::facet_grid(recorder_id ~ ., scales = "free_y") +
+  ggplot2::labs(
+    title = "BirdNET identifications over time by recorder",
+    subtitle = time_series_plot_linear_subtitle,
+    x = "time bin",
+    y = "identifications per bin"
   ) +
   analysis_plot_theme()
 
@@ -2002,12 +2030,14 @@ if (isTRUE(show_plots_in_session) && interactive()) {
   }
 
   print(time_series_plot)
+  print(time_series_plot_linear)
   print(cumulative_species_plot)
   print(species_counts_plot)
   print(species_counts_by_month_plot)
   print(monthly_diversity_plot)
   print(top_species_plot)
   print(time_series_by_recorder_plot)
+  print(time_series_by_recorder_plot_linear)
   print(top_species_by_recorder_plot)
   print(cumulative_species_by_recorder_plot)
   print(species_counts_by_recorder_plot)
@@ -2020,6 +2050,13 @@ if (isTRUE(show_plots_in_session) && interactive()) {
 ggplot2::ggsave(
   filename = file.path(output_dir, "birdnet_identifications_over_time.png"),
   plot = time_series_plot,
+  width = 12,
+  height = 7,
+  dpi = 150
+)
+ggplot2::ggsave(
+  filename = file.path(output_dir, "birdnet_identifications_over_time_linear.png"),
+  plot = time_series_plot_linear,
   width = 12,
   height = 7,
   dpi = 150
@@ -2062,6 +2099,13 @@ ggplot2::ggsave(
 ggplot2::ggsave(
   filename = file.path(output_dir, "birdnet_identifications_over_time_by_recorder.png"),
   plot = time_series_by_recorder_plot,
+  width = 14,
+  height = max(7, 3 * length(recorder_ids)),
+  dpi = 150
+)
+ggplot2::ggsave(
+  filename = file.path(output_dir, "birdnet_identifications_over_time_by_recorder_linear.png"),
+  plot = time_series_by_recorder_plot_linear,
   width = 14,
   height = max(7, 3 * length(recorder_ids)),
   dpi = 150
@@ -2181,6 +2225,19 @@ for (recorder_id in recorder_ids) {
       subtitle = time_series_plot_subtitle,
       x = "time bin",
       y = expression("identifications per bin (" * log[10] * " scale)")
+    ) +
+    analysis_plot_theme()
+
+  recorder_time_series_plot_linear <- ggplot2::ggplot(
+    recorder_time_series,
+    ggplot2::aes(x = time_bin, y = identification_count)
+  ) +
+    ggplot2::geom_col(fill = "steelblue", width = bin_minutes * 60 * 0.9) +
+    ggplot2::labs(
+      title = sprintf("BirdNET identifications over time: %s", recorder_id),
+      subtitle = time_series_plot_linear_subtitle,
+      x = "time bin",
+      y = "identifications per bin"
     ) +
     analysis_plot_theme()
 
@@ -2323,6 +2380,7 @@ for (recorder_id in recorder_ids) {
   )
 
   ggplot2::ggsave(file.path(recorder_dir, "birdnet_identifications_over_time.png"), recorder_time_series_plot, width = 12, height = 7, dpi = 150)
+  ggplot2::ggsave(file.path(recorder_dir, "birdnet_identifications_over_time_linear.png"), recorder_time_series_plot_linear, width = 12, height = 7, dpi = 150)
   ggplot2::ggsave(file.path(recorder_dir, "birdnet_cumulative_new_species.png"), recorder_cumulative_plot, width = 12, height = 7, dpi = 150)
   ggplot2::ggsave(file.path(recorder_dir, "birdnet_identifications_by_species.png"), recorder_species_plot, width = 13, height = 10, dpi = 150)
   ggplot2::ggsave(file.path(recorder_dir, "birdnet_identifications_by_species_by_month.png"), recorder_species_by_month_plot, width = 16, height = 12, dpi = 150)

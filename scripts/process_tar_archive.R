@@ -1,3 +1,15 @@
+# user-defined settings ----------------------------------------------------
+source_mode <- "archive"  # "archive" or "ecosounds"
+
+archive_file <- "/Volumes/bradshaw/acoustic/GEL_A/GEL_A202508202025_12312025.tar.zst"
+ecosounds_workbench_url <- "https://api.ecosounds.org"
+ecosounds_project_id <- 1281L
+ecosounds_auth_token <- Sys.getenv("ECOSOUNDS_AUTH_TOKEN", unset = "")
+ecosounds_user_name <- Sys.getenv("ECOSOUNDS_USERNAME", unset = "")
+ecosounds_password <- Sys.getenv("ECOSOUNDS_PASSWORD", unset = "")
+# -------------------------------------------------------------------------
+
+
 get_script_dir <- function() {
   command_args <- commandArgs(trailingOnly = FALSE)
   file_args <- grep("^--file=", command_args, value = TRUE)
@@ -34,16 +46,6 @@ if (!requireNamespace("jsonlite", quietly = TRUE)) {
   stop("The jsonlite package is required for EcoSounds downloads. Install it with install.packages('jsonlite').")
 }
 
-# user-defined settings ----------------------------------------------------
-source_mode <- "archive"  # "archive" or "ecosounds"
-
-archive_file <- "/Volumes/bradshaw/acoustic/GEL_A/GEL_A202508202025_12312025.tar.zst"
-ecosounds_workbench_url <- "https://api.ecosounds.org"
-ecosounds_project_id <- 1281L
-ecosounds_auth_token <- Sys.getenv("ECOSOUNDS_AUTH_TOKEN", unset = "")
-ecosounds_user_name <- Sys.getenv("ECOSOUNDS_USERNAME", unset = "")
-ecosounds_password <- Sys.getenv("ECOSOUNDS_PASSWORD", unset = "")
-# -------------------------------------------------------------------------
 
 species_csv <- normalizePath(
   file.path(

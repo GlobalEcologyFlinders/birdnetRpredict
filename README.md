@@ -9,12 +9,11 @@ The audio-file repository is available at <a href="https://api.ecosounds.org/pro
 R-based <a href="https://birdnet.cornell.edu">BirdNET</a> workflow for:
 
 1. processing a single audio file
-2. processing a large local `.tar.zst` archive one `.flac` at a time
-3. downloading and processing original recordings directly from an authenticated EcoSounds project
-4. converting non-`.wav` source audio to `.wav`
-5. filtering BirdNET predictions with a repository-local species list
-6. writing per-file prediction summaries and rolling progress reports
-7. post-processing existing summary CSVs into plots and aggregate tables
+2. processing a large local `.tar.zst` archive one `.flac` at a time <strong>OR</strong> downloading and processing original recordings directly from an authenticated EcoSounds project
+3. converting non-`.wav` source audio to `.wav`
+4. filtering BirdNET predictions with a repository-local species list
+5. writing per-file prediction summaries and rolling progress reports
+6. post-processing existing summary CSVs into plots and aggregate tables
 
 ## Repository layout
 

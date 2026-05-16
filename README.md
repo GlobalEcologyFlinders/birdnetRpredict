@@ -485,7 +485,8 @@ skipped_existing
 ```
 
 This allows rerunning the script after interruption without reprocessing every file, regardless of whether the source is a local archive or EcoSounds.
-In EcoSounds mode, restart/skip behavior is keyed to stable recording IDs in the output path, so already processed recordings are skipped on rerun before any fresh download is attempted.
+When switching between archive mode and EcoSounds mode, skip detection now also uses an origin-agnostic recording key derived from the underlying timestamped audio filename, so recordings already processed from one source are skipped when encountered later from the other source.
+In EcoSounds mode, the stable recording-ID path is still used for the local EcoSounds output tree itself, so already processed recordings are also skipped on rerun before any fresh download is attempted.
 
 ## Contingencies and failure behaviour
 

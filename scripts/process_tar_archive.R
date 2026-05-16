@@ -135,6 +135,15 @@ safe_file_component <- function(text_value) {
   text_value
 }
 
+canonical_recording_key <- function(path_text) {
+  candidate <- basename(as.character(path_text))
+  candidate <- sub("_birdnet_species_summary\\.csv$", "", candidate)
+  candidate <- sub("_birdnet_predictions\\.csv$", "", candidate)
+  candidate <- sub("\\.(wav|flac|mp3|aif|aiff|ogg|m4a|mp4)$", "", candidate, ignore.case = TRUE)
+  candidate <- sub("^recording_[0-9]+_", "", candidate)
+  candidate
+}
+
 ecosounds_archive_member <- function(recording) {
   canonical_name <- basename(as.character(recording[["canonical_file_name"]]))
   file.path(
@@ -913,6 +922,79 @@ output_paths_for_member <- function(output_dir, archive_member) {
   )
 }
 
+build_existing_summary_index <- function(out_root) {
+  summary_csv_files <- list.files(
+    out_root,
+    pattern = "_birdnet_species_summary\\.csv$",
+    recursive = TRUE,
+    full.names = TRUE
+  )
+  summary_csv_files <- summary_csv_files[!grepl("/analysis/", summary_csv_files)]
+  summary_csv_files <- summary_csv_files[file.exists(summary_csv_files)]
+
+  if (length(summary_csv_files) == 0) {
+    return(data.frame(
+      recording_key = character(),
+      summary_csv = character(),
+      predictions_csv = character(),
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  summary_index <- data.frame(
+    recording_key = vapply(summary_csv_files, canonical_recording_key, character(1)),
+    summary_csv = summary_csv_files,
+    predictions_csv = sub(
+      "_birdnet_species_summary\\.csv$",
+      "_birdnet_predictions.csv",
+      summary_csv_files
+    ),
+    stringsAsFactors = FALSE
+  )
+  summary_index <- summary_index[!duplicated(summary_index$recording_key), , drop = FALSE]
+  summary_index
+}
+
+find_existing_output_paths <- function(archive_member, output_paths, summary_index) {
+  if (file.exists(output_paths$summary_csv)) {
+    return(output_paths)
+  }
+
+  recording_key <- canonical_recording_key(archive_member)
+  matching_rows <- summary_index[summary_index$recording_key == recording_key, , drop = FALSE]
+
+  if (nrow(matching_rows) == 0) {
+    return(NULL)
+  }
+
+  list(
+    predictions_csv = matching_rows$predictions_csv[[1]],
+    summary_csv = matching_rows$summary_csv[[1]]
+  )
+}
+
+add_summary_to_index <- function(summary_index, archive_member, output_paths) {
+  if (is.null(output_paths$summary_csv) || !file.exists(output_paths$summary_csv)) {
+    return(summary_index)
+  }
+
+  recording_key <- canonical_recording_key(archive_member)
+
+  if (recording_key %in% summary_index$recording_key) {
+    return(summary_index)
+  }
+
+  rbind(
+    summary_index,
+    data.frame(
+      recording_key = recording_key,
+      summary_csv = output_paths$summary_csv,
+      predictions_csv = output_paths$predictions_csv,
+      stringsAsFactors = FALSE
+    )
+  )
+}
+
 write_file_results_txt <- function(manifest, output_path) {
   lines <- c(
     "BirdNET processing results by file",
@@ -1122,6 +1204,7 @@ append_skipped_existing_manifest <- function(manifest,
 
   write.csv(manifest, manifest_csv, row.names = FALSE)
   write_file_results_txt(manifest, file_results_txt)
+  existing_summary_index <<- add_summary_to_index(existing_summary_index, archive_member, output_paths)
   update_live_progress(
     manifest = manifest,
     current_member = archive_member,
@@ -1157,16 +1240,22 @@ process_local_audio_item <- function(archive_member,
     total_files = total_files
   )
 
-  if (file.exists(output_paths$summary_csv)) {
+  existing_output_paths <- find_existing_output_paths(
+    archive_member = archive_member,
+    output_paths = output_paths,
+    summary_index = existing_summary_index
+  )
+
+  if (!is.null(existing_output_paths)) {
     manifest <- append_skipped_existing_manifest(
       manifest = manifest,
       archive_member = archive_member,
-      output_paths = output_paths,
+      output_paths = existing_output_paths,
       file_started_at = file_started_at,
       total_files = total_files,
       start_time = start_time
     )
-    emit_console(sprintf("%s Skipping existing results for %s", phase_prefix, archive_member))
+    emit_console(sprintf("%s Skipping existing results for %s using %s", phase_prefix, archive_member, existing_output_paths$summary_csv))
     if (cleanup_input && file.exists(input_audio_path)) {
       unlink(input_audio_path, force = TRUE)
     }
@@ -1310,6 +1399,7 @@ process_local_audio_item <- function(archive_member,
 
   write.csv(manifest, manifest_csv, row.names = FALSE)
   write_file_results_txt(manifest, file_results_txt)
+  existing_summary_index <<- add_summary_to_index(existing_summary_index, archive_member, result)
   update_live_progress(
     manifest = manifest,
     current_member = archive_member,
@@ -1360,6 +1450,7 @@ process_streamed_flac <- function(archive_member,
 }
 
 dir.create(output_root, recursive = TRUE, showWarnings = FALSE)
+existing_summary_index <- build_existing_summary_index(file.path(script_dir, "..", "out"))
 start_time <- Sys.time()
 total_files <- 0L
 members_seen <- 0L
@@ -1537,19 +1628,24 @@ if (identical(source_mode, "archive")) {
     recording <- recordings[recording_index, , drop = FALSE]
     archive_member <- ecosounds_archive_member(recording)
     output_paths <- output_paths_for_member(output_root, archive_member)
+    existing_output_paths <- find_existing_output_paths(
+      archive_member = archive_member,
+      output_paths = output_paths,
+      summary_index = existing_summary_index
+    )
     phase_prefix <- sprintf("[%s]", progress_label(recording_index, total_files))
 
-    if (file.exists(output_paths$summary_csv)) {
+    if (!is.null(existing_output_paths)) {
       file_started_at <- Sys.time()
       manifest <- append_skipped_existing_manifest(
         manifest = manifest,
         archive_member = archive_member,
-        output_paths = output_paths,
+        output_paths = existing_output_paths,
         file_started_at = file_started_at,
         total_files = total_files,
         start_time = start_time
       )
-      emit_console(sprintf("%s Skipping existing results for %s", phase_prefix, archive_member))
+      emit_console(sprintf("%s Skipping existing results for %s using %s", phase_prefix, archive_member, existing_output_paths$summary_csv))
       next
     }
 

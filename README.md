@@ -291,13 +291,31 @@ The analysis workflow writes:
   one row per discovered summary CSV, showing whether it was loaded successfully
 
 - `birdnet_analysis_filtered_detections.csv`  
-  all retained detections after applying the chosen minimum confidence threshold
+  all retained detections after applying the chosen minimum confidence threshold, now including local light-phase classification where timestamps and coordinates can be recovered
 
 - `birdnet_identifications_by_time_bin.csv`  
   identifications per time bin, plus unique species count per bin
 
 - `birdnet_identifications_by_time_bin_by_recorder.csv`  
   identifications per time bin for each recorder separately
+
+- `birdnet_light_phase_calendar.csv`  
+  local civil-dawn, sunrise, sunset, and civil-dusk times by date/location, plus total daylight, twilight, and darkness hours
+
+- `birdnet_light_phase_calendar_long.csv`  
+  the same local light-phase calendar in long format, one row per date/location/phase
+
+- `birdnet_light_phase_sampling_effort.csv`  
+  total sampled recording hours falling within daylight, twilight, and darkness across all currently analysed recordings
+
+- `birdnet_light_phase_sampling_effort_by_recorder.csv`  
+  the same sampled light-phase effort summarized separately for each recorder
+
+- `birdnet_diel_activity_by_species.csv`  
+  per-species daylight, twilight, and darkness detections, normalized detections-per-hour, dominant light phase, and normalized night-versus-day rate ratio
+
+- `birdnet_diel_activity_by_species_by_recorder.csv`  
+  recorder-specific diel activity summaries by species using the same normalized light-phase metrics
 
 - `birdnet_top_10_species_detections_through_time.csv`  
   detections through time for the 10 most detected species across all currently analysed recorders
@@ -359,6 +377,8 @@ The analysis workflow writes:
 - `birdnet_identifications_over_time.png`
 - `birdnet_identifications_over_time_linear.png`
 - `birdnet_top_10_species_detections_through_time.png`
+- `birdnet_diel_activity_by_species.png`
+- `birdnet_day_night_calling_bias_by_species.png`
 - `birdnet_cumulative_new_species.png`
 - `birdnet_identifications_by_species.png`
 - `birdnet_identifications_by_species_by_month.png`
@@ -386,6 +406,7 @@ Monthly diversity metrics treat the number of detections per species as the abun
 The top-species time-series plots default to 24-hour bins through `top_species_time_bin_minutes <- 24 × 60`, but that bin size can be changed directly in `scripts/analyse_birdnet_output.R`.
 In the recorder-comparison diversity figure, each recorder-by-metric panel now uses its own y-axis range so Shannon, Simpson, and Hill-number panels are scaled to their local maxima.
 The temporal periodicity figures now show both detections per time bin and unique species identified per time bin. Autocorrelation function (ACF) and partial autocorrelation function (PACF) panels include approximate type I error bands (<code>± 1.96/√<em>N</em></code>), spectral-density panels mark the strongest candidate periods, and the companion Ljung-Box CSV outputs provide a compact test summary at identified lags for easier interpretation of recurring temporal structure.
+The diel activity analysis reconstructs local daylight, civil twilight, and darkness from each recording's timestamp and recovered coordinates, summarizes the sampled hours available in each light phase, and reports normalized detections-per-hour so day-versus-night comparisons are not biased by unequal photoperiod or recording effort.
 
 ### Diversity-metric calculations
 

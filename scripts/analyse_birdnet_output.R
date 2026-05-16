@@ -1,7 +1,7 @@
 # user-defined settings ----------------------------------------------------
 analysis_timezone <- "Australia/Adelaide"
 bin_minutes <- 60
-top_species_time_bin_minutes <- 24 * 60
+top_species_time_bin_minutes <- 4 * 7 * 24 * 60
 rolling_mean_window_days <- 30
 min_confidence <- 0.1
 periodicity_max_lag_bins <- 48L
@@ -213,6 +213,89 @@ top_species_plot_theme <- function() {
     )
 }
 
+build_species_label_parser <- function(plotmath_lookup) {
+  function(x) {
+    parse(text = unname(plotmath_lookup[as.character(x)]))
+  }
+}
+
+top_species_style_values <- function(species_levels) {
+  species_levels <- unique(as.character(species_levels))
+
+  if (length(species_levels) == 0L) {
+    return(list(
+      colours = setNames(character(0), character(0)),
+      linetypes = setNames(character(0), character(0)),
+      linewidths = setNames(numeric(0), character(0)),
+      shapes = setNames(numeric(0), character(0)),
+      point_sizes = setNames(numeric(0), character(0))
+    ))
+  }
+
+  line_colours <- grDevices::hcl.colors(length(species_levels), palette = "Dark 3")
+  line_types <- rep(
+    c("solid", "longdash", "dashed", "dotdash", "twodash", "dotted"),
+    length.out = length(species_levels)
+  )
+  line_widths <- rep(c(0.8, 1.0, 1.2, 1.4), length.out = length(species_levels))
+  point_shapes <- rep(c(16, 17, 15, 18, 3, 7, 8, 0, 1, 2), length.out = length(species_levels))
+  point_sizes <- rep(c(1.8, 2.1, 2.4, 2.7, 2.0, 2.3, 2.6, 2.2, 2.5, 2.8), length.out = length(species_levels))
+
+  list(
+    colours = stats::setNames(line_colours, species_levels),
+    linetypes = stats::setNames(line_types, species_levels),
+    linewidths = stats::setNames(line_widths, species_levels),
+    shapes = stats::setNames(point_shapes, species_levels),
+    point_sizes = stats::setNames(point_sizes, species_levels)
+  )
+}
+
+top_species_scale_layers <- function(style_values, label_parser, legend_rows = 2L) {
+  species_levels <- names(style_values$colours)
+
+  list(
+    ggplot2::scale_colour_manual(
+      values = style_values$colours,
+      breaks = species_levels,
+      labels = label_parser,
+      guide = ggplot2::guide_legend(
+        nrow = legend_rows,
+        byrow = TRUE,
+        override.aes = list(
+          linetype = unname(style_values$linetypes[species_levels]),
+          linewidth = unname(style_values$linewidths[species_levels]),
+          shape = unname(style_values$shapes[species_levels]),
+          size = unname(style_values$point_sizes[species_levels])
+        )
+      )
+    ),
+    ggplot2::scale_linetype_manual(
+      values = style_values$linetypes,
+      breaks = species_levels,
+      labels = label_parser,
+      guide = "none"
+    ),
+    ggplot2::scale_linewidth_manual(
+      values = style_values$linewidths,
+      breaks = species_levels,
+      labels = label_parser,
+      guide = "none"
+    ),
+    ggplot2::scale_shape_manual(
+      values = style_values$shapes,
+      breaks = species_levels,
+      labels = label_parser,
+      guide = "none"
+    ),
+    ggplot2::scale_size_manual(
+      values = style_values$point_sizes,
+      breaks = species_levels,
+      labels = label_parser,
+      guide = "none"
+    )
+  )
+}
+
 normalise_common_name <- function(common_name) {
   proper_noun_replacements <- c(
     "australian" = "Australian",
@@ -268,6 +351,604 @@ extract_recorder_id <- function(path_text) {
   }
 
   "unknown"
+}
+
+na_posixct <- function(timezone) {
+  structure(NA_real_, class = c("POSIXct", "POSIXt"), tzone = timezone)
+}
+
+extract_recording_coordinates_from_path <- function(path_text) {
+  matches <- regexec(
+    "(-?[0-9]{1,2}\\.[0-9]+)([+-][0-9]{1,3}\\.[0-9]+)",
+    basename(path_text),
+    perl = TRUE
+  )
+  parts <- regmatches(basename(path_text), matches)[[1]]
+
+  if (length(parts) == 3) {
+    return(c(
+      latitude = as.numeric(parts[2]),
+      longitude = as.numeric(parts[3])
+    ))
+  }
+
+  c(latitude = NA_real_, longitude = NA_real_)
+}
+
+extract_recording_start_time_from_path <- function(path_text, timezone) {
+  timestamp_text <- regmatches(
+    basename(path_text),
+    regexpr("[0-9]{8}T[0-9]{6}[+-][0-9]{4}", basename(path_text))
+  )
+
+  if (length(timestamp_text) == 1 && !is.na(timestamp_text) && nzchar(timestamp_text)) {
+    return(as.POSIXct(timestamp_text, format = "%Y%m%dT%H%M%S%z", tz = timezone))
+  }
+
+  na_posixct(timezone)
+}
+
+build_summary_file_metadata <- function(summary_csv_files, timezone) {
+  metadata_list <- lapply(summary_csv_files, function(summary_csv) {
+    coordinates <- extract_recording_coordinates_from_path(summary_csv)
+    recording_start_time <- extract_recording_start_time_from_path(summary_csv, timezone = timezone)
+    local_date <- if (is.na(recording_start_time)) {
+      as.Date(NA)
+    } else {
+      as.Date(strftime(recording_start_time, "%Y-%m-%d", tz = timezone))
+    }
+
+    data.frame(
+      summary_csv = summary_csv,
+      recorder_id = extract_recorder_id(summary_csv),
+      recording_start_time = recording_start_time,
+      local_date = local_date,
+      recording_latitude = unname(coordinates[["latitude"]]),
+      recording_longitude = unname(coordinates[["longitude"]]),
+      stringsAsFactors = FALSE
+    )
+  })
+
+  do.call(rbind, metadata_list)
+}
+
+deg2rad <- function(x) {
+  x * pi / 180
+}
+
+sun_calc_to_julian <- function(date_time) {
+  as.numeric(date_time) / 86400 - 0.5 + 2440588
+}
+
+sun_calc_from_julian <- function(julian_day, timezone) {
+  as.POSIXct((julian_day + 0.5 - 2440588) * 86400, origin = "1970-01-01", tz = timezone)
+}
+
+sun_calc_to_days <- function(date_time) {
+  sun_calc_to_julian(date_time) - 2451545
+}
+
+sun_calc_julian_cycle <- function(days_since_j2000, longitude_west_radians) {
+  round(days_since_j2000 - 0.0009 - longitude_west_radians / (2 * pi))
+}
+
+sun_calc_approx_transit <- function(hour_angle_radians, longitude_west_radians, julian_cycle) {
+  0.0009 + (hour_angle_radians + longitude_west_radians) / (2 * pi) + julian_cycle
+}
+
+sun_calc_solar_mean_anomaly <- function(approx_transit_days) {
+  deg2rad(357.5291 + 0.98560028 * approx_transit_days)
+}
+
+sun_calc_ecliptic_longitude <- function(mean_anomaly_radians) {
+  mean_anomaly_radians +
+    deg2rad(1.9148) * sin(mean_anomaly_radians) +
+    deg2rad(0.02) * sin(2 * mean_anomaly_radians) +
+    deg2rad(0.0003) * sin(3 * mean_anomaly_radians) +
+    deg2rad(102.9372) +
+    pi
+}
+
+sun_calc_declination <- function(ecliptic_longitude_radians, latitude_radians = 0) {
+  earth_obliquity <- deg2rad(23.4397)
+  asin(
+    sin(latitude_radians) * cos(earth_obliquity) +
+      cos(latitude_radians) * sin(earth_obliquity) * sin(ecliptic_longitude_radians)
+  )
+}
+
+sun_calc_solar_transit <- function(approx_transit_days, mean_anomaly_radians, ecliptic_longitude_radians) {
+  2451545 +
+    approx_transit_days +
+    0.0053 * sin(mean_anomaly_radians) -
+    0.0069 * sin(2 * ecliptic_longitude_radians)
+}
+
+sun_calc_hour_angle <- function(solar_altitude_radians, latitude_radians, declination_radians) {
+  cos_hour_angle <- (
+    sin(solar_altitude_radians) -
+      sin(latitude_radians) * sin(declination_radians)
+  ) / (cos(latitude_radians) * cos(declination_radians))
+
+  if (is.na(cos_hour_angle) || cos_hour_angle < -1 || cos_hour_angle > 1) {
+    return(NA_real_)
+  }
+
+  acos(cos_hour_angle)
+}
+
+sun_calc_set_julian <- function(solar_altitude_radians,
+                                longitude_west_radians,
+                                latitude_radians,
+                                declination_radians,
+                                julian_cycle,
+                                mean_anomaly_radians,
+                                ecliptic_longitude_radians) {
+  hour_angle <- sun_calc_hour_angle(
+    solar_altitude_radians = solar_altitude_radians,
+    latitude_radians = latitude_radians,
+    declination_radians = declination_radians
+  )
+
+  if (is.na(hour_angle)) {
+    return(NA_real_)
+  }
+
+  sun_calc_solar_transit(
+    sun_calc_approx_transit(hour_angle, longitude_west_radians, julian_cycle),
+    mean_anomaly_radians,
+    ecliptic_longitude_radians
+  )
+}
+
+calculate_solar_times <- function(local_date, latitude, longitude, timezone) {
+  date_noon <- as.POSIXct(
+    sprintf("%s 12:00:00", format(as.Date(local_date), "%Y-%m-%d")),
+    tz = timezone
+  )
+  longitude_west_radians <- deg2rad(-longitude)
+  latitude_radians <- deg2rad(latitude)
+  days_since_j2000 <- sun_calc_to_days(date_noon)
+  julian_cycle <- sun_calc_julian_cycle(days_since_j2000, longitude_west_radians)
+  approx_transit_days <- sun_calc_approx_transit(0, longitude_west_radians, julian_cycle)
+  mean_anomaly_radians <- sun_calc_solar_mean_anomaly(approx_transit_days)
+  ecliptic_longitude_radians <- sun_calc_ecliptic_longitude(mean_anomaly_radians)
+  declination_radians <- sun_calc_declination(ecliptic_longitude_radians)
+  solar_noon_julian <- sun_calc_solar_transit(
+    approx_transit_days,
+    mean_anomaly_radians,
+    ecliptic_longitude_radians
+  )
+  sunrise_set_julian <- sun_calc_set_julian(
+    solar_altitude_radians = deg2rad(-0.833),
+    longitude_west_radians = longitude_west_radians,
+    latitude_radians = latitude_radians,
+    declination_radians = declination_radians,
+    julian_cycle = julian_cycle,
+    mean_anomaly_radians = mean_anomaly_radians,
+    ecliptic_longitude_radians = ecliptic_longitude_radians
+  )
+  civil_dusk_julian <- sun_calc_set_julian(
+    solar_altitude_radians = deg2rad(-6),
+    longitude_west_radians = longitude_west_radians,
+    latitude_radians = latitude_radians,
+    declination_radians = declination_radians,
+    julian_cycle = julian_cycle,
+    mean_anomaly_radians = mean_anomaly_radians,
+    ecliptic_longitude_radians = ecliptic_longitude_radians
+  )
+
+  if (is.na(sunrise_set_julian) || is.na(civil_dusk_julian)) {
+    solar_noon_altitude <- asin(
+      sin(latitude_radians) * sin(declination_radians) +
+        cos(latitude_radians) * cos(declination_radians)
+    )
+    is_continuous_daylight <- solar_noon_altitude > deg2rad(-0.833)
+
+    return(data.frame(
+      local_date = as.Date(local_date),
+      latitude = latitude,
+      longitude = longitude,
+      civil_dawn = na_posixct(timezone),
+      sunrise = na_posixct(timezone),
+      solar_noon = sun_calc_from_julian(solar_noon_julian, timezone = timezone),
+      sunset = na_posixct(timezone),
+      civil_dusk = na_posixct(timezone),
+      fallback_phase = if (isTRUE(is_continuous_daylight)) "daylight" else "night",
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  sunrise_julian <- solar_noon_julian - (sunrise_set_julian - solar_noon_julian)
+  civil_dawn_julian <- solar_noon_julian - (civil_dusk_julian - solar_noon_julian)
+
+  data.frame(
+    local_date = as.Date(local_date),
+    latitude = latitude,
+    longitude = longitude,
+    civil_dawn = sun_calc_from_julian(civil_dawn_julian, timezone = timezone),
+    sunrise = sun_calc_from_julian(sunrise_julian, timezone = timezone),
+    solar_noon = sun_calc_from_julian(solar_noon_julian, timezone = timezone),
+    sunset = sun_calc_from_julian(sunrise_set_julian, timezone = timezone),
+    civil_dusk = sun_calc_from_julian(civil_dusk_julian, timezone = timezone),
+    fallback_phase = NA_character_,
+    stringsAsFactors = FALSE
+  )
+}
+
+build_light_phase_schedule <- function(local_date, latitude, longitude, timezone) {
+  solar_times <- calculate_solar_times(
+    local_date = local_date,
+    latitude = latitude,
+    longitude = longitude,
+    timezone = timezone
+  )
+  day_start <- as.POSIXct(sprintf("%s 00:00:00", format(as.Date(local_date), "%Y-%m-%d")), tz = timezone)
+  next_day <- day_start + 24 * 3600
+
+  if (!is.na(solar_times$fallback_phase[[1]])) {
+    interval_df <- data.frame(
+      light_phase = solar_times$fallback_phase[[1]],
+      interval_start = day_start,
+      interval_end = next_day,
+      stringsAsFactors = FALSE
+    )
+  } else {
+    interval_df <- data.frame(
+      light_phase = c("night", "twilight", "daylight", "twilight", "night"),
+      interval_start = c(day_start, solar_times$civil_dawn[[1]], solar_times$sunrise[[1]], solar_times$sunset[[1]], solar_times$civil_dusk[[1]]),
+      interval_end = c(solar_times$civil_dawn[[1]], solar_times$sunrise[[1]], solar_times$sunset[[1]], solar_times$civil_dusk[[1]], next_day),
+      stringsAsFactors = FALSE
+    )
+    interval_df <- interval_df[interval_df$interval_end > interval_df$interval_start, , drop = FALSE]
+  }
+
+  interval_df$local_date <- as.Date(local_date)
+  interval_df$latitude <- latitude
+  interval_df$longitude <- longitude
+  interval_df
+}
+
+build_light_phase_lookup <- function(local_dates, latitudes, longitudes, timezone) {
+  unique_keys <- unique(data.frame(
+    local_date = as.Date(local_dates),
+    latitude = as.numeric(latitudes),
+    longitude = as.numeric(longitudes),
+    stringsAsFactors = FALSE
+  ))
+  unique_keys <- unique_keys[!is.na(unique_keys$local_date) & !is.na(unique_keys$latitude) & !is.na(unique_keys$longitude), , drop = FALSE]
+
+  if (nrow(unique_keys) == 0) {
+    return(list(
+      solar_times = data.frame(
+        local_date = as.Date(character()),
+        latitude = numeric(),
+        longitude = numeric(),
+        civil_dawn = as.POSIXct(character()),
+        sunrise = as.POSIXct(character()),
+        solar_noon = as.POSIXct(character()),
+        sunset = as.POSIXct(character()),
+        civil_dusk = as.POSIXct(character()),
+        fallback_phase = character(),
+        stringsAsFactors = FALSE
+      ),
+      schedules = data.frame(
+        light_phase = character(),
+        interval_start = as.POSIXct(character()),
+        interval_end = as.POSIXct(character()),
+        local_date = as.Date(character()),
+        latitude = numeric(),
+        longitude = numeric(),
+        stringsAsFactors = FALSE
+      )
+    ))
+  }
+
+  solar_times <- do.call(
+    rbind,
+    lapply(seq_len(nrow(unique_keys)), function(index) {
+      calculate_solar_times(
+        local_date = unique_keys$local_date[[index]],
+        latitude = unique_keys$latitude[[index]],
+        longitude = unique_keys$longitude[[index]],
+        timezone = timezone
+      )
+    })
+  )
+  schedules <- do.call(
+    rbind,
+    lapply(seq_len(nrow(unique_keys)), function(index) {
+      build_light_phase_schedule(
+        local_date = unique_keys$local_date[[index]],
+        latitude = unique_keys$latitude[[index]],
+        longitude = unique_keys$longitude[[index]],
+        timezone = timezone
+      )
+    })
+  )
+
+  list(solar_times = solar_times, schedules = schedules)
+}
+
+classify_light_phase <- function(date_time, solar_time_row) {
+  if (nrow(solar_time_row) != 1 || is.na(date_time)) {
+    return(NA_character_)
+  }
+
+  if (!is.na(solar_time_row$fallback_phase[[1]])) {
+    return(solar_time_row$fallback_phase[[1]])
+  }
+
+  if (date_time >= solar_time_row$sunrise[[1]] && date_time < solar_time_row$sunset[[1]]) {
+    return("daylight")
+  }
+
+  if (date_time >= solar_time_row$civil_dawn[[1]] && date_time < solar_time_row$sunrise[[1]]) {
+    return("twilight")
+  }
+
+  if (date_time >= solar_time_row$sunset[[1]] && date_time < solar_time_row$civil_dusk[[1]]) {
+    return("twilight")
+  }
+
+  "night"
+}
+
+estimate_recording_duration_seconds <- function(summary_metadata, default_hours = 1) {
+  recorder_ids <- unique(summary_metadata$recorder_id)
+  duration_table <- lapply(recorder_ids, function(recorder_id) {
+    recorder_starts <- sort(unique(summary_metadata$recording_start_time[summary_metadata$recorder_id == recorder_id]))
+    recorder_starts <- recorder_starts[!is.na(recorder_starts)]
+    positive_diffs <- as.numeric(diff(recorder_starts), units = "secs")
+    positive_diffs <- positive_diffs[is.finite(positive_diffs) & positive_diffs > 0 & positive_diffs <= 6 * 3600]
+
+    data.frame(
+      recorder_id = recorder_id,
+      estimated_duration_seconds = if (length(positive_diffs) > 0) stats::median(positive_diffs) else default_hours * 3600,
+      stringsAsFactors = FALSE
+    )
+  })
+
+  do.call(rbind, duration_table)
+}
+
+interval_overlap_seconds <- function(start_a, end_a, start_b, end_b) {
+  overlap_start <- max(as.numeric(start_a), as.numeric(start_b))
+  overlap_end <- min(as.numeric(end_a), as.numeric(end_b))
+  max(0, overlap_end - overlap_start)
+}
+
+calculate_recording_phase_effort <- function(recording_start_time,
+                                             recording_end_time,
+                                             latitude,
+                                             longitude,
+                                             timezone) {
+  covered_dates <- seq(
+    from = as.Date(strftime(recording_start_time, "%Y-%m-%d", tz = timezone)),
+    to = as.Date(strftime(recording_end_time - 1, "%Y-%m-%d", tz = timezone)),
+    by = "day"
+  )
+
+  effort_rows <- lapply(covered_dates, function(local_date) {
+    phase_schedule <- build_light_phase_schedule(
+      local_date = local_date,
+      latitude = latitude,
+      longitude = longitude,
+      timezone = timezone
+    )
+
+    overlaps <- vapply(
+      seq_len(nrow(phase_schedule)),
+      function(index) {
+        interval_overlap_seconds(
+          recording_start_time,
+          recording_end_time,
+          phase_schedule$interval_start[[index]],
+          phase_schedule$interval_end[[index]]
+        )
+      },
+      numeric(1)
+    )
+
+    data.frame(
+      local_date = as.Date(local_date),
+      light_phase = phase_schedule$light_phase,
+      sampled_hours = overlaps / 3600,
+      stringsAsFactors = FALSE
+    )
+  })
+
+  effort_df <- do.call(rbind, effort_rows)
+  aggregate(
+    list(sampled_hours = effort_df$sampled_hours),
+    by = list(
+      local_date = effort_df$local_date,
+      light_phase = effort_df$light_phase
+    ),
+    FUN = sum
+  )
+}
+
+build_recording_phase_effort <- function(summary_metadata, timezone) {
+  valid_metadata <- summary_metadata[
+    !is.na(summary_metadata$recording_start_time) &
+      !is.na(summary_metadata$recording_latitude) &
+      !is.na(summary_metadata$recording_longitude),
+    ,
+    drop = FALSE
+  ]
+
+  if (nrow(valid_metadata) == 0) {
+    return(data.frame(
+      summary_csv = character(),
+      recorder_id = character(),
+      local_date = as.Date(character()),
+      light_phase = character(),
+      sampled_hours = numeric(),
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  duration_lookup <- estimate_recording_duration_seconds(valid_metadata)
+  valid_metadata <- merge(valid_metadata, duration_lookup, by = "recorder_id", all.x = TRUE)
+  valid_metadata$recording_end_time <- valid_metadata$recording_start_time + valid_metadata$estimated_duration_seconds
+
+  effort_list <- lapply(seq_len(nrow(valid_metadata)), function(index) {
+    effort_df <- calculate_recording_phase_effort(
+      recording_start_time = valid_metadata$recording_start_time[[index]],
+      recording_end_time = valid_metadata$recording_end_time[[index]],
+      latitude = valid_metadata$recording_latitude[[index]],
+      longitude = valid_metadata$recording_longitude[[index]],
+      timezone = timezone
+    )
+    effort_df$summary_csv <- valid_metadata$summary_csv[[index]]
+    effort_df$recorder_id <- valid_metadata$recorder_id[[index]]
+    effort_df
+  })
+
+  do.call(rbind, effort_list)
+}
+
+build_diel_species_summary <- function(detections_subset, effort_summary, include_recorder = FALSE) {
+  light_phase_levels <- c("daylight", "twilight", "night")
+  empty_summary <- data.frame(
+    scientific_name = character(),
+    common_name = character(),
+    species_label = character(),
+    total_detections = integer(),
+    daylight_detections = integer(),
+    twilight_detections = integer(),
+    night_detections = integer(),
+    daylight_effort_hours = numeric(),
+    twilight_effort_hours = numeric(),
+    night_effort_hours = numeric(),
+    daylight_detections_per_hour = numeric(),
+    twilight_detections_per_hour = numeric(),
+    night_detections_per_hour = numeric(),
+    daylight_detection_share = numeric(),
+    twilight_detection_share = numeric(),
+    night_detection_share = numeric(),
+    dominant_light_phase = character(),
+    log2_night_day_rate_ratio = numeric(),
+    stringsAsFactors = FALSE
+  )
+
+  if (isTRUE(include_recorder)) {
+    empty_summary <- cbind(data.frame(recorder_id = character(), stringsAsFactors = FALSE), empty_summary)
+  }
+
+  if (nrow(detections_subset) == 0) {
+    return(empty_summary)
+  }
+
+  grouping_columns <- c(if (isTRUE(include_recorder)) "recorder_id", "scientific_name", "common_name", "species_label")
+  count_groups <- c(grouping_columns, "light_phase")
+  counts_long <- aggregate(
+    list(detection_count = rep(1L, nrow(detections_subset))),
+    by = as.list(detections_subset[, count_groups, drop = FALSE]),
+    FUN = sum
+  )
+
+  species_lookup <- unique(detections_subset[, grouping_columns, drop = FALSE])
+  phase_grid <- data.frame(light_phase = light_phase_levels, stringsAsFactors = FALSE)
+  full_grid <- merge(species_lookup, phase_grid, by = NULL)
+  counts_long <- merge(full_grid, counts_long, by = count_groups, all.x = TRUE)
+  counts_long$detection_count[is.na(counts_long$detection_count)] <- 0L
+
+  effort_key_columns <- c(if (isTRUE(include_recorder)) "recorder_id", "light_phase")
+  counts_long <- merge(counts_long, effort_summary, by = effort_key_columns, all.x = TRUE)
+  counts_long$sampled_hours[is.na(counts_long$sampled_hours)] <- 0
+  counts_long$detections_per_hour <- ifelse(
+    counts_long$sampled_hours > 0,
+    counts_long$detection_count / counts_long$sampled_hours,
+    NA_real_
+  )
+
+  summary_list <- lapply(split(counts_long, interaction(counts_long[, grouping_columns, drop = FALSE], drop = TRUE)), function(group_df) {
+    group_df <- group_df[match(light_phase_levels, group_df$light_phase), , drop = FALSE]
+    total_detections <- sum(group_df$detection_count)
+    shares <- if (total_detections > 0) {
+      group_df$detection_count / total_detections
+    } else {
+      rep(0, length(light_phase_levels))
+    }
+    phase_rates <- group_df$detections_per_hour
+    dominant_phase <- light_phase_levels[[which.max(replace(phase_rates, is.na(phase_rates), -Inf))]]
+    night_rate <- (group_df$detection_count[group_df$light_phase == "night"] + 0.5) /
+      (group_df$sampled_hours[group_df$light_phase == "night"] + 0.5)
+    daylight_rate <- (group_df$detection_count[group_df$light_phase == "daylight"] + 0.5) /
+      (group_df$sampled_hours[group_df$light_phase == "daylight"] + 0.5)
+
+    summary_row <- data.frame(
+      scientific_name = group_df$scientific_name[[1]],
+      common_name = group_df$common_name[[1]],
+      species_label = group_df$species_label[[1]],
+      total_detections = total_detections,
+      daylight_detections = group_df$detection_count[group_df$light_phase == "daylight"],
+      twilight_detections = group_df$detection_count[group_df$light_phase == "twilight"],
+      night_detections = group_df$detection_count[group_df$light_phase == "night"],
+      daylight_effort_hours = group_df$sampled_hours[group_df$light_phase == "daylight"],
+      twilight_effort_hours = group_df$sampled_hours[group_df$light_phase == "twilight"],
+      night_effort_hours = group_df$sampled_hours[group_df$light_phase == "night"],
+      daylight_detections_per_hour = group_df$detections_per_hour[group_df$light_phase == "daylight"],
+      twilight_detections_per_hour = group_df$detections_per_hour[group_df$light_phase == "twilight"],
+      night_detections_per_hour = group_df$detections_per_hour[group_df$light_phase == "night"],
+      daylight_detection_share = shares[group_df$light_phase == "daylight"],
+      twilight_detection_share = shares[group_df$light_phase == "twilight"],
+      night_detection_share = shares[group_df$light_phase == "night"],
+      dominant_light_phase = dominant_phase,
+      log2_night_day_rate_ratio = log2(night_rate / daylight_rate),
+      stringsAsFactors = FALSE
+    )
+
+    if (isTRUE(include_recorder)) {
+      summary_row <- cbind(
+        data.frame(recorder_id = as.character(group_df$recorder_id[[1]]), stringsAsFactors = FALSE),
+        summary_row
+      )
+    }
+
+    summary_row
+  })
+
+  summary_df <- do.call(rbind, summary_list)
+  summary_df[order(-summary_df$total_detections, summary_df$species_label), , drop = FALSE]
+}
+
+build_diel_species_long <- function(diel_species_summary, include_recorder = FALSE) {
+  id_columns <- c(if (isTRUE(include_recorder)) "recorder_id", "scientific_name", "common_name", "species_label", "total_detections", "dominant_light_phase", "log2_night_day_rate_ratio")
+  do.call(
+    rbind,
+    list(
+      data.frame(
+        diel_species_summary[, id_columns, drop = FALSE],
+        light_phase = "daylight",
+        detection_count = diel_species_summary$daylight_detections,
+        sampled_hours = diel_species_summary$daylight_effort_hours,
+        detections_per_hour = diel_species_summary$daylight_detections_per_hour,
+        detection_share = diel_species_summary$daylight_detection_share,
+        stringsAsFactors = FALSE
+      ),
+      data.frame(
+        diel_species_summary[, id_columns, drop = FALSE],
+        light_phase = "twilight",
+        detection_count = diel_species_summary$twilight_detections,
+        sampled_hours = diel_species_summary$twilight_effort_hours,
+        detections_per_hour = diel_species_summary$twilight_detections_per_hour,
+        detection_share = diel_species_summary$twilight_detection_share,
+        stringsAsFactors = FALSE
+      ),
+      data.frame(
+        diel_species_summary[, id_columns, drop = FALSE],
+        light_phase = "night",
+        detection_count = diel_species_summary$night_detections,
+        sampled_hours = diel_species_summary$night_effort_hours,
+        detections_per_hour = diel_species_summary$night_detections_per_hour,
+        detection_share = diel_species_summary$night_detection_share,
+        stringsAsFactors = FALSE
+      )
+    )
+  )
 }
 
 calculate_diversity_metrics <- function(detection_counts) {
@@ -1055,7 +1736,9 @@ write_analysis_summary <- function(summary_txt,
                                    rolling_mean_window_days,
                                    min_confidence,
                                    file_status,
-                                   filtered_detections) {
+                                   filtered_detections,
+                                   light_phase_sampling_effort,
+                                   diel_species_summary) {
   unique_species <- if (nrow(filtered_detections) > 0) {
     length(unique(filtered_detections$scientific_name))
   } else {
@@ -1083,6 +1766,34 @@ write_analysis_summary <- function(summary_txt,
         "Detection time span: %s to %s",
         format(min(filtered_detections$date_time), "%Y-%m-%d %H:%M:%S %z"),
         format(max(filtered_detections$date_time), "%Y-%m-%d %H:%M:%S %z")
+      )
+    )
+  }
+
+  if (nrow(light_phase_sampling_effort) > 0) {
+    effort_lookup <- stats::setNames(light_phase_sampling_effort$sampled_hours, light_phase_sampling_effort$light_phase)
+    analysis_lines <- c(
+      analysis_lines,
+      sprintf("Sampled daylight hours used in diel analysis: %.2f", unname(ifelse(is.na(effort_lookup[["daylight"]]), 0, effort_lookup[["daylight"]]))),
+      sprintf("Sampled twilight hours used in diel analysis: %.2f", unname(ifelse(is.na(effort_lookup[["twilight"]]), 0, effort_lookup[["twilight"]]))),
+      sprintf("Sampled night hours used in diel analysis: %.2f", unname(ifelse(is.na(effort_lookup[["night"]]), 0, effort_lookup[["night"]])))
+    )
+  }
+
+  if (nrow(diel_species_summary) > 0) {
+    day_species <- diel_species_summary[which.min(diel_species_summary$log2_night_day_rate_ratio), , drop = FALSE]
+    night_species <- diel_species_summary[which.max(diel_species_summary$log2_night_day_rate_ratio), , drop = FALSE]
+    analysis_lines <- c(
+      analysis_lines,
+      sprintf(
+        "strongest daylight-biased species by normalised rate: %s (log2 night/day rate ratio = %.2f)",
+        day_species$species_label[[1]],
+        day_species$log2_night_day_rate_ratio[[1]]
+      ),
+      sprintf(
+        "strongest night-biased species by normalised rate: %s (log2 night/day rate ratio = %.2f)",
+        night_species$species_label[[1]],
+        night_species$log2_night_day_rate_ratio[[1]]
       )
     )
   }
@@ -1174,6 +1885,7 @@ summary_csv_files <- list.files(
   full.names = TRUE
 )
 summary_csv_files <- summary_csv_files[!grepl("/analysis/", summary_csv_files)]
+summary_file_metadata <- build_summary_file_metadata(summary_csv_files, timezone = analysis_timezone)
 
 if (length(summary_csv_files) == 0) {
   stop("no *_birdnet_species_summary.csv files were found under summary_root")
@@ -1187,6 +1899,11 @@ file_status <- data.frame(
   message = vapply(summary_results, `[[`, character(1), "message"),
   stringsAsFactors = FALSE
 )
+file_status$recorder_id <- summary_file_metadata$recorder_id
+file_status$recording_start_time <- summary_file_metadata$recording_start_time
+file_status$local_date <- summary_file_metadata$local_date
+file_status$recording_latitude <- summary_file_metadata$recording_latitude
+file_status$recording_longitude <- summary_file_metadata$recording_longitude
 
 loaded_tables <- lapply(seq_along(summary_results), function(index) {
   summary_table <- summary_results[[index]]$data
@@ -1196,6 +1913,9 @@ loaded_tables <- lapply(seq_along(summary_results), function(index) {
   }
 
   summary_table$source_summary_csv <- summary_csv_files[[index]]
+   summary_table$recording_start_time <- summary_file_metadata$recording_start_time[[index]]
+   summary_table$recording_latitude <- summary_file_metadata$recording_latitude[[index]]
+   summary_table$recording_longitude <- summary_file_metadata$recording_longitude[[index]]
   summary_table
 })
 loaded_tables <- Filter(Negate(is.null), loaded_tables)
@@ -1223,6 +1943,7 @@ if (anyNA(combined_detections$date_time)) {
 
 combined_detections <- combined_detections[order(combined_detections$date_time, combined_detections$scientific_name), , drop = FALSE]
 combined_detections$common_name <- vapply(combined_detections$common_name, normalise_common_name, character(1))
+combined_detections$species_label <- paste0(combined_detections$common_name, " (", combined_detections$scientific_name, ")")
 combined_detections$recorder_id <- vapply(combined_detections$source_summary_csv, extract_recorder_id, character(1))
 filtered_detections <- combined_detections[combined_detections$confidence >= min_confidence, , drop = FALSE]
 
@@ -1233,11 +1954,60 @@ if (nrow(filtered_detections) == 0) {
 filtered_detections$month_num <- as.integer(format(filtered_detections$date_time, "%m"))
 filtered_detections$month_label <- factor(month.abb[filtered_detections$month_num], levels = month.abb)
 filtered_detections$month_start <- as.Date(strftime(filtered_detections$date_time, "%Y-%m-01", tz = analysis_timezone))
+filtered_detections$local_date <- as.Date(strftime(filtered_detections$date_time, "%Y-%m-%d", tz = analysis_timezone))
+filtered_detections$local_hour <- as.numeric(strftime(filtered_detections$date_time, "%H", tz = analysis_timezone)) +
+  as.numeric(strftime(filtered_detections$date_time, "%M", tz = analysis_timezone)) / 60 +
+  as.numeric(strftime(filtered_detections$date_time, "%S", tz = analysis_timezone)) / 3600
 filtered_detections$time_bin <- floor_to_bin(
   filtered_detections$date_time,
   bin_minutes = bin_minutes,
   timezone = analysis_timezone
 )
+light_phase_bundle <- build_light_phase_lookup(
+  local_dates = filtered_detections$local_date,
+  latitudes = filtered_detections$recording_latitude,
+  longitudes = filtered_detections$recording_longitude,
+  timezone = analysis_timezone
+)
+
+if (nrow(light_phase_bundle$solar_times) > 0) {
+  light_phase_keys <- paste(
+    light_phase_bundle$solar_times$local_date,
+    signif(light_phase_bundle$solar_times$latitude, 8),
+    signif(light_phase_bundle$solar_times$longitude, 8),
+    sep = "|"
+  )
+  detection_keys <- paste(
+    filtered_detections$local_date,
+    signif(filtered_detections$recording_latitude, 8),
+    signif(filtered_detections$recording_longitude, 8),
+    sep = "|"
+  )
+  light_phase_match <- match(detection_keys, light_phase_keys)
+  filtered_detections$civil_dawn <- light_phase_bundle$solar_times$civil_dawn[light_phase_match]
+  filtered_detections$sunrise <- light_phase_bundle$solar_times$sunrise[light_phase_match]
+  filtered_detections$sunset <- light_phase_bundle$solar_times$sunset[light_phase_match]
+  filtered_detections$civil_dusk <- light_phase_bundle$solar_times$civil_dusk[light_phase_match]
+  filtered_detections$light_phase <- vapply(
+    seq_len(nrow(filtered_detections)),
+    function(index) {
+      if (is.na(light_phase_match[[index]])) {
+        return(NA_character_)
+      }
+      classify_light_phase(
+        date_time = filtered_detections$date_time[[index]],
+        solar_time_row = light_phase_bundle$solar_times[light_phase_match[[index]], , drop = FALSE]
+      )
+    },
+    character(1)
+  )
+} else {
+  filtered_detections$civil_dawn <- na_posixct(analysis_timezone)
+  filtered_detections$sunrise <- na_posixct(analysis_timezone)
+  filtered_detections$sunset <- na_posixct(analysis_timezone)
+  filtered_detections$civil_dusk <- na_posixct(analysis_timezone)
+  filtered_detections$light_phase <- NA_character_
+}
 
 time_grid <- build_complete_time_grid(
   start_time = min(filtered_detections$date_time),
@@ -1427,6 +2197,8 @@ top_species_time_series_positive <- top_species_time_series[
   ,
   drop = FALSE
 ]
+top_species_label_parser <- build_species_label_parser(species_label_plotmath_lookup)
+top_species_style <- top_species_style_values(levels(top_species_time_series$species_label))
 
 overall_monthly_diversity_summary <- build_monthly_diversity_summary(
   transform(filtered_detections, recorder_id = "ALL_RECORDERS"),
@@ -1476,6 +2248,7 @@ top_species_time_series_by_recorder_positive <- top_species_time_series_by_recor
   ,
   drop = FALSE
 ]
+top_species_by_recorder_style <- top_species_style_values(unique(as.character(top_species_time_series_by_recorder$species_label)))
 
 cumulative_new_species_by_recorder <- do.call(
   rbind,
@@ -1614,9 +2387,123 @@ periodicity_by_recorder <- temporal_diagnostics_by_recorder[
   drop = FALSE
 ]
 
+if (nrow(light_phase_bundle$schedules) > 0) {
+  light_phase_calendar_long <- aggregate(
+    list(
+      phase_hours = as.numeric(
+        difftime(
+          light_phase_bundle$schedules$interval_end,
+          light_phase_bundle$schedules$interval_start,
+          units = "hours"
+        )
+      )
+    ),
+    by = list(
+      local_date = light_phase_bundle$schedules$local_date,
+      latitude = light_phase_bundle$schedules$latitude,
+      longitude = light_phase_bundle$schedules$longitude,
+      light_phase = light_phase_bundle$schedules$light_phase
+    ),
+    FUN = sum
+  )
+  light_phase_calendar <- reshape(
+    light_phase_calendar_long,
+    idvar = c("local_date", "latitude", "longitude"),
+    timevar = "light_phase",
+    direction = "wide"
+  )
+  names(light_phase_calendar) <- sub("^phase_hours\\.", "", names(light_phase_calendar))
+  names(light_phase_calendar)[names(light_phase_calendar) %in% c("daylight", "twilight", "night")] <- paste0(
+    names(light_phase_calendar)[names(light_phase_calendar) %in% c("daylight", "twilight", "night")],
+    "_hours"
+  )
+  light_phase_calendar <- merge(
+    light_phase_bundle$solar_times,
+    light_phase_calendar,
+    by = c("local_date", "latitude", "longitude"),
+    all.x = TRUE
+  )
+
+  for (phase_name in c("daylight_hours", "twilight_hours", "night_hours")) {
+    if (!phase_name %in% names(light_phase_calendar)) {
+      light_phase_calendar[[phase_name]] <- 0
+    }
+    light_phase_calendar[[phase_name]][is.na(light_phase_calendar[[phase_name]])] <- 0
+  }
+} else {
+  light_phase_calendar_long <- data.frame(
+    local_date = as.Date(character()),
+    latitude = numeric(),
+    longitude = numeric(),
+    light_phase = character(),
+    phase_hours = numeric(),
+    stringsAsFactors = FALSE
+  )
+  light_phase_calendar <- data.frame(
+    local_date = as.Date(character()),
+    latitude = numeric(),
+    longitude = numeric(),
+    civil_dawn = as.POSIXct(character()),
+    sunrise = as.POSIXct(character()),
+    solar_noon = as.POSIXct(character()),
+    sunset = as.POSIXct(character()),
+    civil_dusk = as.POSIXct(character()),
+    fallback_phase = character(),
+    daylight_hours = numeric(),
+    twilight_hours = numeric(),
+    night_hours = numeric(),
+    stringsAsFactors = FALSE
+  )
+}
+
+recording_phase_effort <- build_recording_phase_effort(summary_file_metadata, timezone = analysis_timezone)
+if (nrow(recording_phase_effort) > 0) {
+  light_phase_sampling_effort <- aggregate(
+    list(sampled_hours = recording_phase_effort$sampled_hours),
+    by = list(light_phase = recording_phase_effort$light_phase),
+    FUN = sum
+  )
+  light_phase_sampling_effort_by_recorder <- aggregate(
+    list(sampled_hours = recording_phase_effort$sampled_hours),
+    by = list(recorder_id = recording_phase_effort$recorder_id, light_phase = recording_phase_effort$light_phase),
+    FUN = sum
+  )
+} else {
+  light_phase_sampling_effort <- data.frame(
+    light_phase = character(),
+    sampled_hours = numeric(),
+    stringsAsFactors = FALSE
+  )
+  light_phase_sampling_effort_by_recorder <- data.frame(
+    recorder_id = character(),
+    light_phase = character(),
+    sampled_hours = numeric(),
+    stringsAsFactors = FALSE
+  )
+}
+
+diel_detections <- filtered_detections[!is.na(filtered_detections$light_phase), , drop = FALSE]
+diel_species_summary <- build_diel_species_summary(
+  detections_subset = diel_detections,
+  effort_summary = light_phase_sampling_effort,
+  include_recorder = FALSE
+)
+diel_species_summary_by_recorder <- build_diel_species_summary(
+  detections_subset = diel_detections,
+  effort_summary = light_phase_sampling_effort_by_recorder,
+  include_recorder = TRUE
+)
+diel_species_long <- build_diel_species_long(diel_species_summary, include_recorder = FALSE)
+
 analysis_summary_txt <- file.path(output_dir, "birdnet_analysis_summary.txt")
 input_files_csv <- file.path(output_dir, "birdnet_analysis_input_files.csv")
 filtered_detections_csv <- file.path(output_dir, "birdnet_analysis_filtered_detections.csv")
+light_phase_calendar_csv <- file.path(output_dir, "birdnet_light_phase_calendar.csv")
+light_phase_calendar_long_csv <- file.path(output_dir, "birdnet_light_phase_calendar_long.csv")
+light_phase_sampling_effort_csv <- file.path(output_dir, "birdnet_light_phase_sampling_effort.csv")
+light_phase_sampling_effort_by_recorder_csv <- file.path(output_dir, "birdnet_light_phase_sampling_effort_by_recorder.csv")
+diel_species_csv <- file.path(output_dir, "birdnet_diel_activity_by_species.csv")
+diel_species_by_recorder_csv <- file.path(output_dir, "birdnet_diel_activity_by_species_by_recorder.csv")
 time_series_csv <- file.path(output_dir, "birdnet_identifications_by_time_bin.csv")
 time_series_by_recorder_csv <- file.path(output_dir, "birdnet_identifications_by_time_bin_by_recorder.csv")
 top_species_time_series_csv <- file.path(output_dir, "birdnet_top_10_species_detections_through_time.csv")
@@ -1641,6 +2528,12 @@ temporal_peaks_by_recorder_csv <- file.path(output_dir, "birdnet_temporal_spectr
 
 write.csv(file_status, input_files_csv, row.names = FALSE)
 write.csv(filtered_detections, filtered_detections_csv, row.names = FALSE)
+write.csv(light_phase_calendar, light_phase_calendar_csv, row.names = FALSE)
+write.csv(light_phase_calendar_long, light_phase_calendar_long_csv, row.names = FALSE)
+write.csv(light_phase_sampling_effort, light_phase_sampling_effort_csv, row.names = FALSE)
+write.csv(light_phase_sampling_effort_by_recorder, light_phase_sampling_effort_by_recorder_csv, row.names = FALSE)
+write.csv(diel_species_summary, diel_species_csv, row.names = FALSE)
+write.csv(diel_species_summary_by_recorder, diel_species_by_recorder_csv, row.names = FALSE)
 write.csv(time_series_summary, time_series_csv, row.names = FALSE)
 write.csv(time_series_by_recorder, time_series_by_recorder_csv, row.names = FALSE)
 write.csv(top_species_time_series, top_species_time_series_csv, row.names = FALSE)
@@ -1673,7 +2566,9 @@ write_analysis_summary(
   rolling_mean_window_days = rolling_mean_window_days,
   min_confidence = min_confidence,
   file_status = file_status,
-  filtered_detections = filtered_detections
+  filtered_detections = filtered_detections,
+  light_phase_sampling_effort = light_phase_sampling_effort,
+  diel_species_summary = diel_species_summary
 )
 
 plot_subtitle <- sprintf(
@@ -1810,13 +2705,18 @@ top_species_plot <- ggplot2::ggplot(
   top_species_time_series,
   ggplot2::aes(x = time_bin, y = identification_count_plot, colour = species_label, group = species_label)
 ) +
-  ggplot2::geom_line(data = top_species_time_series_positive, linewidth = 0.9) +
-  ggplot2::geom_point(data = top_species_time_series_positive, size = 1.5) +
-  ggplot2::scale_colour_discrete(
-    labels = function(x) {
-      parse(text = unname(species_label_plotmath_lookup[as.character(x)]))
-    },
-    guide = ggplot2::guide_legend(nrow = 2, byrow = TRUE)
+  ggplot2::geom_line(
+    data = top_species_time_series_positive,
+    ggplot2::aes(linetype = species_label, linewidth = species_label)
+  ) +
+  ggplot2::geom_point(
+    data = top_species_time_series_positive,
+    ggplot2::aes(shape = species_label, size = species_label),
+    stroke = 0.7
+  ) +
+  top_species_scale_layers(
+    style_values = top_species_style,
+    label_parser = top_species_label_parser
   ) +
   ggplot2::scale_y_log10() +
   ggplot2::labs(
@@ -1963,14 +2863,19 @@ top_species_by_recorder_plot <- ggplot2::ggplot(
   top_species_time_series_by_recorder,
   ggplot2::aes(x = time_bin, y = identification_count_plot, colour = species_label, group = species_label)
 ) +
-  ggplot2::geom_line(data = top_species_time_series_by_recorder_positive, linewidth = 0.9) +
-  ggplot2::geom_point(data = top_species_time_series_by_recorder_positive, size = 1.3) +
+  ggplot2::geom_line(
+    data = top_species_time_series_by_recorder_positive,
+    ggplot2::aes(linetype = species_label, linewidth = species_label)
+  ) +
+  ggplot2::geom_point(
+    data = top_species_time_series_by_recorder_positive,
+    ggplot2::aes(shape = species_label, size = species_label),
+    stroke = 0.7
+  ) +
   ggplot2::facet_grid(recorder_id ~ ., scales = "free_y") +
-  ggplot2::scale_colour_discrete(
-    labels = function(x) {
-      parse(text = unname(species_label_plotmath_lookup[as.character(x)]))
-    },
-    guide = ggplot2::guide_legend(nrow = 2, byrow = TRUE)
+  top_species_scale_layers(
+    style_values = top_species_by_recorder_style,
+    label_parser = top_species_label_parser
   ) +
   ggplot2::scale_y_log10() +
   ggplot2::labs(
@@ -1981,6 +2886,111 @@ top_species_by_recorder_plot <- ggplot2::ggplot(
     colour = "species"
   ) +
   top_species_plot_theme()
+
+diel_plot_subtitle <- paste(
+  "normalized by sampled hours within local daylight, civil twilight, and darkness",
+  sprintf("| minimum confidence: %.3f", min_confidence)
+)
+
+if (nrow(diel_species_summary) > 0 && any(is.finite(diel_species_summary$log2_night_day_rate_ratio))) {
+  diel_top_species <- diel_species_summary[seq_len(min(20L, nrow(diel_species_summary))), , drop = FALSE]
+  diel_top_species_long <- diel_species_long[diel_species_long$species_label %in% diel_top_species$species_label, , drop = FALSE]
+  heatmap_species_levels <- rev(diel_top_species$species_label)
+  diel_top_species_long$species_label <- factor(as.character(diel_top_species_long$species_label), levels = heatmap_species_levels)
+  diel_top_species_long$detections_per_hour_plot <- ifelse(
+    diel_top_species_long$detections_per_hour > 0,
+    diel_top_species_long$detections_per_hour,
+    NA_real_
+  )
+
+  diel_bias_species <- diel_top_species[order(diel_top_species$log2_night_day_rate_ratio, diel_top_species$species_label), , drop = FALSE]
+  diel_bias_species$species_label <- factor(as.character(diel_bias_species$species_label), levels = diel_bias_species$species_label)
+
+  diel_activity_heatmap_plot <- ggplot2::ggplot(
+    diel_top_species_long,
+    ggplot2::aes(x = light_phase, y = species_label, fill = detections_per_hour_plot)
+  ) +
+    ggplot2::geom_tile(colour = "white", linewidth = 0.3) +
+    ggplot2::scale_x_discrete(
+      labels = c(daylight = "daylight", twilight = "civil twilight", night = "darkness"),
+      drop = FALSE
+    ) +
+    ggplot2::scale_y_discrete(
+      labels = function(x) {
+        parse(text = unname(species_label_plotmath_lookup[as.character(x)]))
+      }
+    ) +
+    ggplot2::scale_fill_gradient(
+      low = "grey95",
+      high = "midnightblue",
+      trans = scales::log2_trans(),
+      na.value = "grey90"
+    ) +
+    ggplot2::labs(
+      title = "local light-phase calling activity by species",
+      subtitle = diel_plot_subtitle,
+      x = "local light phase",
+      y = "species",
+      fill = expression(log[2] * "(detections per hour)")
+    ) +
+    ggplot2::theme_minimal(base_size = 12) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(face = "bold"),
+      plot.subtitle = ggplot2::element_text(size = 11),
+      axis.text.y = ggplot2::element_text(size = 8.4),
+      panel.grid = ggplot2::element_blank()
+    )
+
+  diel_preference_plot <- ggplot2::ggplot(
+    diel_bias_species,
+    ggplot2::aes(x = log2_night_day_rate_ratio, y = species_label, fill = dominant_light_phase)
+  ) +
+    ggplot2::geom_col(width = 0.75) +
+    ggplot2::geom_vline(xintercept = 0, colour = "grey30", linewidth = 0.5, linetype = "dashed") +
+    ggplot2::scale_y_discrete(
+      labels = function(x) {
+        parse(text = unname(species_label_plotmath_lookup[as.character(x)]))
+      }
+    ) +
+    ggplot2::scale_fill_manual(
+      values = c(daylight = "goldenrod2", twilight = "darkorchid3", night = "midnightblue"),
+      labels = c(daylight = "daylight", twilight = "civil twilight", night = "darkness"),
+      drop = FALSE
+    ) +
+    ggplot2::labs(
+      title = "normalized night-versus-day calling bias by species",
+      subtitle = diel_plot_subtitle,
+      x = expression(log[2] * "(night/day detections per hour)"),
+      y = "species",
+      fill = "highest\nrate phase"
+    ) +
+    ggplot2::theme_minimal(base_size = 12) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(face = "bold"),
+      plot.subtitle = ggplot2::element_text(size = 11),
+      axis.text.y = ggplot2::element_text(size = 8.4),
+      panel.grid.minor = ggplot2::element_blank()
+    )
+} else {
+  diel_activity_heatmap_plot <- make_placeholder_plot(
+    title_text = "local light-phase calling activity by species",
+    subtitle_text = diel_plot_subtitle,
+    body_text = paste(
+      "not enough detections with recoverable timestamps and coordinates",
+      "are currently available to summarize daylight, twilight, and darkness activity.",
+      sep = "\n"
+    )
+  )
+  diel_preference_plot <- make_placeholder_plot(
+    title_text = "normalized night-versus-day calling bias by species",
+    subtitle_text = diel_plot_subtitle,
+    body_text = paste(
+      "not enough detections with recoverable timestamps and coordinates",
+      "are currently available to compare normalized night and daylight calling rates.",
+      sep = "\n"
+    )
+  )
+}
 
 temporal_diagnostics$facet_label <- paste(temporal_diagnostics$metric_name, temporal_diagnostics$panel, sep = "\n")
 temporal_peaks$facet_label <- paste(temporal_peaks$metric_name, "spectral density", sep = "\n")
@@ -2036,6 +3046,8 @@ if (isTRUE(show_plots_in_session) && interactive()) {
   print(species_counts_by_month_plot)
   print(monthly_diversity_plot)
   print(top_species_plot)
+  print(diel_activity_heatmap_plot)
+  print(diel_preference_plot)
   print(time_series_by_recorder_plot)
   print(time_series_by_recorder_plot_linear)
   print(top_species_by_recorder_plot)
@@ -2094,6 +3106,20 @@ ggplot2::ggsave(
   plot = top_species_plot,
   width = 14,
   height = 8,
+  dpi = 150
+)
+ggplot2::ggsave(
+  filename = file.path(output_dir, "birdnet_diel_activity_by_species.png"),
+  plot = diel_activity_heatmap_plot,
+  width = 13,
+  height = 9,
+  dpi = 150
+)
+ggplot2::ggsave(
+  filename = file.path(output_dir, "birdnet_day_night_calling_bias_by_species.png"),
+  plot = diel_preference_plot,
+  width = 13,
+  height = 9,
   dpi = 150
 )
 ggplot2::ggsave(
@@ -2206,6 +3232,8 @@ for (recorder_id in recorder_ids) {
   ]
   recorder_top_species_levels <- unique(as.character(recorder_top_species$species_label))
   recorder_top_species_lookup <- species_label_plotmath_lookup[recorder_top_species_levels]
+  recorder_top_species_label_parser <- build_species_label_parser(recorder_top_species_lookup)
+  recorder_top_species_style <- top_species_style_values(recorder_top_species_levels)
   recorder_top_species$species_label <- factor(as.character(recorder_top_species$species_label), levels = recorder_top_species_levels)
 
   recorder_time_series_plot <- ggplot2::ggplot(
@@ -2333,17 +3361,16 @@ for (recorder_id in recorder_ids) {
   ) +
     ggplot2::geom_line(
       data = recorder_top_species[!is.na(recorder_top_species$identification_count_plot), , drop = FALSE],
-      linewidth = 0.9
+      ggplot2::aes(linetype = species_label, linewidth = species_label)
     ) +
     ggplot2::geom_point(
       data = recorder_top_species[!is.na(recorder_top_species$identification_count_plot), , drop = FALSE],
-      size = 1.5
+      ggplot2::aes(shape = species_label, size = species_label),
+      stroke = 0.7
     ) +
-    ggplot2::scale_colour_discrete(
-      labels = function(x) {
-        parse(text = unname(recorder_top_species_lookup[as.character(x)]))
-      },
-      guide = ggplot2::guide_legend(nrow = 2, byrow = TRUE)
+    top_species_scale_layers(
+      style_values = recorder_top_species_style,
+      label_parser = recorder_top_species_label_parser
     ) +
     ggplot2::scale_y_log10() +
     ggplot2::labs(

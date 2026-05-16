@@ -193,7 +193,7 @@ analysis_plot_theme <- function() {
     ggplot2::theme(
       plot.title = ggplot2::element_text(face = "bold"),
       plot.subtitle = ggplot2::element_text(size = 11),
-      axis.text.x = ggplot2::element_text(angle = 45, hjust = 1),
+      axis.text.x = ggplot2::element_text(angle = 0, hjust = 1),
       panel.grid.minor = ggplot2::element_blank()
     )
 }
@@ -2586,11 +2586,12 @@ time_series_plot <- ggplot2::ggplot(
   time_series_summary,
   ggplot2::aes(x = time_bin, y = identification_count_plot)
 ) +
-  ggplot2::geom_col(fill = "steelblue", width = bin_minutes * 60 * 0.9, na.rm = TRUE) +
+  ggplot2::geom_col(fill = "steelblue", alpha = 0.5, width = bin_minutes * 60 * 0.9, na.rm = TRUE) +
   ggplot2::geom_line(
     ggplot2::aes(y = identification_count_running_mean_plot),
     colour = "firebrick2",
-    linewidth = 1,
+    linewidth = 1.2,
+    linetype = "dashed",
     na.rm = TRUE
   ) +
   ggplot2::scale_y_log10() +
@@ -2606,7 +2607,7 @@ time_series_plot_linear <- ggplot2::ggplot(
   time_series_summary,
   ggplot2::aes(x = time_bin, y = identification_count)
 ) +
-  ggplot2::geom_col(fill = "steelblue", width = bin_minutes * 60 * 0.9) +
+  ggplot2::geom_col(fill = "steelblue", alpha = 0.5, width = bin_minutes * 60 * 0.9) +
   ggplot2::labs(
     title = "BirdNET identifications over time",
     subtitle = time_series_plot_linear_subtitle,
@@ -2732,11 +2733,12 @@ time_series_by_recorder_plot <- ggplot2::ggplot(
   time_series_by_recorder,
   ggplot2::aes(x = time_bin, y = identification_count_plot)
 ) +
-  ggplot2::geom_col(fill = "steelblue", width = bin_minutes * 60 * 0.9, na.rm = TRUE) +
+  ggplot2::geom_col(fill = "steelblue", alpha = 0.5, width = bin_minutes * 60 * 0.9, na.rm = TRUE) +
   ggplot2::geom_line(
     ggplot2::aes(y = identification_count_running_mean_plot),
     colour = "firebrick2",
-    linewidth = 0.9,
+    linewidth = 1.2,
+    linetype = "dashed",
     na.rm = TRUE
   ) +
   ggplot2::facet_grid(recorder_id ~ ., scales = "free_y") +
@@ -2753,7 +2755,7 @@ time_series_by_recorder_plot_linear <- ggplot2::ggplot(
   time_series_by_recorder,
   ggplot2::aes(x = time_bin, y = identification_count)
 ) +
-  ggplot2::geom_col(fill = "steelblue", width = bin_minutes * 60 * 0.9) +
+  ggplot2::geom_col(fill = "steelblue", alpha = 0.5, width = bin_minutes * 60 * 0.9) +
   ggplot2::facet_grid(recorder_id ~ ., scales = "free_y") +
   ggplot2::labs(
     title = "BirdNET identifications over time by recorder",
@@ -2888,7 +2890,7 @@ top_species_by_recorder_plot <- ggplot2::ggplot(
   top_species_plot_theme()
 
 diel_plot_subtitle <- paste(
-  "normalized by sampled hours within local daylight, civil twilight, and darkness",
+  "normalised by sampled hours within local daylight, civil twilight, and darkness",
   sprintf("| minimum confidence: %.3f", min_confidence)
 )
 
@@ -2958,7 +2960,7 @@ if (nrow(diel_species_summary) > 0 && any(is.finite(diel_species_summary$log2_ni
       drop = FALSE
     ) +
     ggplot2::labs(
-      title = "normalized night-versus-day calling bias by species",
+      title = "normalised night-versus-day calling bias by species",
       subtitle = diel_plot_subtitle,
       x = expression(log[2] * "(night/day detections per hour)"),
       y = "species",
@@ -2982,11 +2984,11 @@ if (nrow(diel_species_summary) > 0 && any(is.finite(diel_species_summary$log2_ni
     )
   )
   diel_preference_plot <- make_placeholder_plot(
-    title_text = "normalized night-versus-day calling bias by species",
+    title_text = "normalised night-versus-day calling bias by species",
     subtitle_text = diel_plot_subtitle,
     body_text = paste(
       "not enough detections with recoverable timestamps and coordinates",
-      "are currently available to compare normalized night and daylight calling rates.",
+      "are currently available to compare normalised night and daylight calling rates.",
       sep = "\n"
     )
   )
@@ -3244,7 +3246,8 @@ for (recorder_id in recorder_ids) {
     ggplot2::geom_line(
       ggplot2::aes(y = identification_count_running_mean_plot),
       colour = "firebrick2",
-      linewidth = 1,
+      linewidth = 1.2,
+      linetype = "dashed",
       na.rm = TRUE
     ) +
     ggplot2::scale_y_log10() +

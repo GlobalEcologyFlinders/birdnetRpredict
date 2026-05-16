@@ -1,4 +1,5 @@
 # Pipeline for analysing audio files for bird identification using <a href="https://birdnet.cornell.edu">BirdNET</a>
+<img align="right" src="www/Acrocephalus_australis_-_Bushell's_Lagoon.jpg" alt="Australian reed warbler" width="220" style="margin-top: 20px">
 
 In partnership with the <a href="http://ngarrindjeri.com.au/">Ngarrindjeri Aboriginal Corporation</a> and the Raukkan Rangers, Flinders University (<a href="http://globalecologyflinders.com/">Global Ecology Laboratory</a>) under the auspices of the Australian Research Council <a href="http://ciehf.au">Centre of Excellence for Indigenous and Environmental Histories and Futures</a> (CIEHF) have set up an initial array of 5 passive acoustic recorders to document the change in bird diversity in recently restored wetlands within the <a href="https://www.environment.sa.gov.au/topics/water-and-river-murray/projects-plans-security-and-legislation/water-projects/coorong/current-projects/on-ground-works/ogw-teringie">Teringie Wetlands</a> complex in South Australia. We are comparing these records to existing wetland complexes and control saltponds devoid of most birdlife (control). These data belong to the Ngarrindjeri Nation.
 
@@ -25,11 +26,17 @@ birdnetRpredict/
 │       ├── reference/
 │       └── regional/
 │           └── lower_murray/
-└── scripts/
-    ├── analyse_birdnet_output.R
-    ├── birdnet_helpers.R
-    ├── birdnetID.R
-    └── process_tar_archive.R
+├── scripts/
+│   ├── analyse_birdnet_output.R
+│   ├── birdnet_helpers.R
+│   ├── birdnetID.R
+│   └── process_tar_archive.R
+└── www/
+    ├── Acrocephalus_australis_-_Bushell's_Lagoon.jpg
+    ├── CIEHF_Logo_Email_Version.jpg
+    ├── Flinders_University_Logo_Stacked_RGB_Master.jpg
+    ├── GEL Logo Kaurna New Transp.png
+    └── NAClogo.png
 ```
 
 ## What the pipeline does
@@ -533,3 +540,6 @@ Files with existing summary outputs skipped automatically.
 - helper functions live in `scripts/birdnet_helpers.R`
 - archive mode mirrors the archive subdirectory structure in the output folder when writing per-file CSV results
 - EcoSounds mode writes outputs under stable `site_<site_id>/recording_<recording_id>_...` paths so interrupted runs can resume cleanly and skip already processed recordings
+
+<br>
+<p><a href="https://www.flinders.edu.au"><img align="bottom-left" src="www/Flinders_University_Logo_Stacked_RGB_Master.jpg" alt="Flinders University" height="60" style="margin-top: 20px"></a> <a href="https://globalecologyflinders.com"><img align="bottom-left" src="www/GEL Logo Kaurna New Transp.png" alt="Global Ecology Laboratory" height="55" style="margin-top: 20px"></a> <a href="https://ciehf.au/"><img align="bottom-left" src="www/CIEHF_Logo_Email_Version.jpg" alt="CIEHF" height="48" style="margin-top: 20px"></a> <a href="http://ngarrindjeri.com.au/"><img align="bottom-left" src="www/NAClogo.png" alt="Ngarrindjeri Aboriginal Corporation" height="52" style="margin-top: 20px"></a></p>

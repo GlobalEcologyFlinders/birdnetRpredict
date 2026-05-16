@@ -31,12 +31,7 @@ birdnetRpredict/
 │   ├── birdnet_helpers.R
 │   ├── birdnetID.R
 │   └── process_tar_archive.R
-└── www/
-    ├── Acrocephalus_australis_-_Bushell's_Lagoon.jpg
-    ├── CIEHF_Logo_Email_Version.jpg
-    ├── Flinders_University_Logo_Stacked_RGB_Master.jpg
-    ├── GEL Logo Kaurna New Transp.png
-    └── NAClogo.png
+└── www
 ```
 
 ## What the pipeline does

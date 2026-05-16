@@ -3,11 +3,15 @@ get_script_dir <- function() {
   file_args <- grep("^--file=", command_args, value = TRUE)
 
   if (length(file_args) > 0) {
-    return(dirname(normalizePath(sub("^--file=", "", file_args[1]))))
+    candidate_path <- sub("^--file=", "", file_args[1])
+
+    if (nzchar(candidate_path) && candidate_path != "-" && file.exists(candidate_path)) {
+      return(dirname(normalizePath(candidate_path)))
+    }
   }
 
   for (frame in rev(sys.frames())) {
-    if (!is.null(frame$ofile)) {
+    if (!is.null(frame$ofile) && nzchar(frame$ofile) && file.exists(frame$ofile)) {
       return(dirname(normalizePath(frame$ofile)))
     }
   }
@@ -26,10 +30,20 @@ if (!requireNamespace("callr", quietly = TRUE)) {
   stop("The callr package is required for monitored BirdNET execution. Install it with install.packages('callr').")
 }
 
-archive_file <- normalizePath(
-  "/Volumes/bradshaw/acoustic/GEL_A/GEL_A202508202025_12312025.tar.zst",
-  mustWork = TRUE
-)
+if (!requireNamespace("jsonlite", quietly = TRUE)) {
+  stop("The jsonlite package is required for EcoSounds downloads. Install it with install.packages('jsonlite').")
+}
+
+# user-defined settings ----------------------------------------------------
+source_mode <- "archive"  # "archive" or "ecosounds"
+
+archive_file <- "/Volumes/bradshaw/acoustic/GEL_A/GEL_A202508202025_12312025.tar.zst"
+ecosounds_workbench_url <- "https://api.ecosounds.org"
+ecosounds_project_id <- 1281L
+ecosounds_auth_token <- Sys.getenv("ECOSOUNDS_AUTH_TOKEN", unset = "")
+ecosounds_user_name <- Sys.getenv("ECOSOUNDS_USERNAME", unset = "")
+ecosounds_password <- Sys.getenv("ECOSOUNDS_PASSWORD", unset = "")
+# -------------------------------------------------------------------------
 
 species_csv <- normalizePath(
   file.path(
@@ -44,17 +58,36 @@ species_csv <- normalizePath(
   mustWork = TRUE
 )
 
-archive_name <- sub("\\.tar\\.zst$", "", basename(archive_file), ignore.case = TRUE)
+if (!source_mode %in% c("archive", "ecosounds")) {
+  stop("source_mode must be either 'archive' or 'ecosounds'.")
+}
+
+archive_file <- if (identical(source_mode, "archive")) {
+  normalizePath(archive_file, mustWork = TRUE)
+} else {
+  archive_file
+}
+
+source_name <- if (identical(source_mode, "archive")) {
+  sub("\\.tar\\.zst$", "", basename(archive_file), ignore.case = TRUE)
+} else {
+  sprintf("ecosounds_project_%s", as.integer(ecosounds_project_id))
+}
+source_description <- if (identical(source_mode, "archive")) {
+  archive_file
+} else {
+  sprintf("EcoSounds project %s via %s", as.integer(ecosounds_project_id), ecosounds_workbench_url)
+}
 output_root <- file.path(
   script_dir,
   "..",
   "out",
-  paste0(archive_name, "_birdnet_output")
+  paste0(source_name, "_birdnet_output")
 )
-extract_root <- file.path(tempdir(), archive_name, "extract")
-manifest_csv <- file.path(output_root, paste0(archive_name, "_processing_manifest.csv"))
-file_results_txt <- file.path(output_root, paste0(archive_name, "_file_results.txt"))
-summary_of_summaries_txt <- file.path(output_root, paste0(archive_name, "_summary_of_summaries.txt"))
+extract_root <- file.path(tempdir(), source_name, "audio_work")
+manifest_csv <- file.path(output_root, paste0(source_name, "_processing_manifest.csv"))
+file_results_txt <- file.path(output_root, paste0(source_name, "_file_results.txt"))
+summary_of_summaries_txt <- file.path(output_root, paste0(source_name, "_summary_of_summaries.txt"))
 stage_heartbeat_seconds <- 5
 stage_timeout_seconds <- 3600
 
@@ -88,6 +121,229 @@ format_duration <- function(seconds) {
 emit_console <- function(message) {
   cat(sprintf("[%s] %s\n", timestamp_text(), message))
   flush.console()
+}
+
+safe_file_component <- function(text_value) {
+  text_value <- gsub("[^-_A-Za-z0-9]", "", text_value)
+
+  if (!nzchar(text_value)) {
+    return("unknown")
+  }
+
+  text_value
+}
+
+ecosounds_archive_member <- function(recording) {
+  canonical_name <- basename(as.character(recording[["canonical_file_name"]]))
+  file.path(
+    sprintf("site_%s", as.integer(recording[["site_id"]])),
+    sprintf("recording_%s_%s", as.integer(recording[["id"]]), canonical_name)
+  )
+}
+
+ecosounds_filter_object <- function(project_id) {
+  list(
+    filter = list(
+      and = list(
+        "projects.id" = list(eq = as.integer(project_id))
+      )
+    ),
+    projection = list(
+      only = c("id", "recorded_date", "sites.name", "site_id", "canonical_file_name")
+    )
+  )
+}
+
+run_curl_request <- function(url,
+                             method = "GET",
+                             headers = character(),
+                             body_json = NULL,
+                             output_file = NULL) {
+  response_file <- if (is.null(output_file)) tempfile(pattern = "curl-response-", fileext = ".tmp") else output_file
+  args <- c("-sS", "-L", "-X", method)
+
+  for (header in headers) {
+    args <- c(args, "-H", header)
+  }
+
+  if (!is.null(body_json)) {
+    args <- c(args, "--data-binary", body_json)
+  }
+
+  args <- c(args, "-o", response_file, "-w", "%{http_code}", url)
+  response <- processx::run("curl", args = args, error_on_status = FALSE)
+
+  if (!identical(response$status, 0L)) {
+    stop(
+      paste(
+        c(
+          sprintf("curl failed for %s", url),
+          trimws(response$stderr)
+        ),
+        collapse = "\n"
+      )
+    )
+  }
+
+  list(
+    status_code = suppressWarnings(as.integer(trimws(response$stdout))),
+    response_file = response_file
+  )
+}
+
+ecosounds_get_auth_token <- function(workbench_url, auth_token = "", user_name = "", password = "") {
+  if (nzchar(auth_token)) {
+    return(auth_token)
+  }
+
+  if (!nzchar(user_name) || !nzchar(password)) {
+    stop(
+      paste(
+        "EcoSounds access requires either ecosounds_auth_token,",
+        "or both ecosounds_user_name and ecosounds_password."
+      )
+    )
+  }
+
+  login_payload <- if (grepl("@", user_name, fixed = TRUE)) {
+    list(email = user_name, password = password)
+  } else {
+    list(login = user_name, password = password)
+  }
+
+  login_response <- run_curl_request(
+    url = sprintf("%s/security", sub("/$", "", workbench_url)),
+    method = "POST",
+    headers = c("Content-Type: application/json", "Accept: application/json"),
+    body_json = jsonlite::toJSON(login_payload, auto_unbox = TRUE)
+  )
+
+  if (!identical(login_response$status_code, 200L)) {
+    stop(sprintf("EcoSounds login failed with HTTP status %s.", login_response$status_code))
+  }
+
+  login_content <- jsonlite::fromJSON(login_response$response_file)
+  token <- login_content$data$auth_token
+
+  if (!nzchar(token)) {
+    stop("EcoSounds login succeeded but no auth_token was returned.")
+  }
+
+  token
+}
+
+list_ecosounds_recordings <- function(workbench_url,
+                                      auth_token,
+                                      project_id,
+                                      manifest,
+                                      start_time) {
+  page <- 1L
+  max_page <- Inf
+  records <- list()
+  base_url <- sub("/$", "", workbench_url)
+  json_headers <- c(
+    sprintf("Authorization: Token token=\"%s\"", auth_token),
+    "Content-Type: application/json",
+    "Accept: application/json"
+  )
+  filter_json <- jsonlite::toJSON(ecosounds_filter_object(project_id), auto_unbox = TRUE)
+
+  while (page <= max_page) {
+    page_response <- run_curl_request(
+      url = sprintf("%s/audio_recordings/filter?page=%d", base_url, page),
+      method = "POST",
+      headers = json_headers,
+      body_json = filter_json
+    )
+
+    if (!identical(page_response$status_code, 200L)) {
+      stop(sprintf("EcoSounds recording listing failed on page %d with HTTP status %s.", page, page_response$status_code))
+    }
+
+    page_content <- jsonlite::fromJSON(page_response$response_file)
+    max_page <- page_content$meta$paging$max_page
+    page_records <- page_content$data
+    records[[length(records) + 1L]] <- if (is.null(page_records)) {
+      data.frame()
+    } else {
+      as.data.frame(page_records, stringsAsFactors = FALSE)
+    }
+
+    recordings_found <- sum(vapply(records, nrow, integer(1)))
+    detail_text <- sprintf(
+      "listing EcoSounds project %s | page=%d/%s | recordings_found_so_far=%d",
+      as.integer(project_id),
+      page,
+      max_page,
+      recordings_found
+    )
+    emit_console(sprintf("[ecosounds list] %s", detail_text))
+    update_live_progress(
+      manifest = manifest,
+      current_member = "",
+      current_phase = "listing_archive",
+      current_detail = detail_text,
+      start_time = start_time,
+      total_files = recordings_found
+    )
+
+    page <- page + 1L
+  }
+
+  non_empty_records <- Filter(function(x) !is.null(x) && nrow(x) > 0, records)
+  if (length(non_empty_records) == 0) {
+    return(data.frame(
+      id = integer(),
+      recorded_date = character(),
+      site_id = integer(),
+      canonical_file_name = character(),
+      check.names = FALSE,
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  do.call(rbind, non_empty_records)
+}
+
+download_ecosounds_recording <- function(recording,
+                                         workbench_url,
+                                         auth_token,
+                                         download_root) {
+  relative_item <- ecosounds_archive_member(recording)
+  local_path <- file.path(download_root, relative_item)
+  dir.create(dirname(local_path), recursive = TRUE, showWarnings = FALSE)
+
+  download_response <- run_curl_request(
+    url = sprintf("%s/audio_recordings/%s/original", sub("/$", "", workbench_url), recording[["id"]]),
+    method = "GET",
+    headers = sprintf("Authorization: Token token=\"%s\"", auth_token),
+    output_file = local_path
+  )
+
+  if (!identical(download_response$status_code, 200L)) {
+    if (file.exists(local_path)) {
+      unlink(local_path, force = TRUE)
+    }
+    stop(
+      sprintf(
+        "EcoSounds download failed for recording %s with HTTP status %s.",
+        recording[["id"]],
+        download_response$status_code
+      )
+    )
+  }
+
+  list(
+    archive_member = relative_item,
+    local_audio_path = local_path,
+    local_workspace = download_root
+  )
+}
+
+cleanup_local_workspace <- function(workspace_path) {
+  if (!is.null(workspace_path) && nzchar(workspace_path) && dir.exists(workspace_path)) {
+    unlink(workspace_path, recursive = TRUE, force = TRUE)
+  }
 }
 
 progress_label <- function(index, total_files) {
@@ -167,6 +423,8 @@ stage_progress <- function(stage) {
     listing_archive = 0,
     starting_file = 0,
     skipped_existing = 100,
+    downloading_audio = 10,
+    downloaded_audio = 20,
     extracting_flac = 10,
     extracted_flac = 20,
     converting_wav = 30,
@@ -655,7 +913,7 @@ output_paths_for_member <- function(output_dir, archive_member) {
 
 write_file_results_txt <- function(manifest, output_path) {
   lines <- c(
-    "BirdNET archive processing results by file",
+    "BirdNET processing results by file",
     paste("Updated:", timestamp_text()),
     ""
   )
@@ -694,7 +952,7 @@ write_file_results_txt <- function(manifest, output_path) {
 
 write_summary_of_summaries_txt <- function(manifest,
                                            output_path,
-                                           archive_file,
+                                           source_description,
                                            current_member,
                                            current_phase,
                                            current_detail,
@@ -728,8 +986,8 @@ write_summary_of_summaries_txt <- function(manifest,
   }
 
   lines <- c(
-    "BirdNET archive summary of summaries",
-    paste("Archive:", archive_file),
+    "BirdNET processing summary of summaries",
+    paste("Source:", source_description),
     paste("Updated:", timestamp_text()),
     paste("Current file:", if (nzchar(current_member)) current_member else "none"),
     paste("Current phase:", if (nzchar(current_phase)) current_phase else "idle"),
@@ -777,7 +1035,7 @@ update_live_progress <- function(manifest,
   write_summary_of_summaries_txt(
     manifest = manifest,
     output_path = summary_of_summaries_txt,
-    archive_file = archive_file,
+    source_description = source_description,
     current_member = current_member,
     current_phase = current_phase,
     current_detail = current_detail,
@@ -828,12 +1086,61 @@ parse_archive_stream_event <- function(line) {
   list(event = "RAW", raw = line)
 }
 
-process_streamed_flac <- function(archive_member,
-                                  flac_path,
-                                  file_index,
-                                  total_files,
-                                  manifest,
-                                  start_time) {
+append_skipped_existing_manifest <- function(manifest,
+                                             archive_member,
+                                             output_paths,
+                                             file_started_at,
+                                             total_files,
+                                             start_time) {
+  summary_df <- safe_read_summary_csv(output_paths$summary_csv)
+  file_finished_at <- Sys.time()
+  processing_seconds <- as.numeric(difftime(file_finished_at, file_started_at, units = "secs"))
+
+  manifest <- rbind(
+    manifest,
+    data.frame(
+      archive_member = archive_member,
+      status = "skipped_existing",
+      started_at = timestamp_text(file_started_at),
+      finished_at = timestamp_text(file_finished_at),
+      processing_seconds = processing_seconds,
+      processing_time_hms = format_duration(processing_seconds),
+      recording_date = if (nrow(summary_df) > 0) substr(summary_df$date_time[1], 1, 10) else "",
+      recording_latitude = NA_real_,
+      recording_longitude = NA_real_,
+      predictions_csv = output_paths$predictions_csv,
+      summary_csv = output_paths$summary_csv,
+      summary_rows = nrow(summary_df),
+      total_species_identified = length(unique(summary_df$scientific_name)),
+      species_detected = collapse_species(summary_df),
+      error_message = "",
+      stringsAsFactors = FALSE
+    )
+  )
+
+  write.csv(manifest, manifest_csv, row.names = FALSE)
+  write_file_results_txt(manifest, file_results_txt)
+  update_live_progress(
+    manifest = manifest,
+    current_member = archive_member,
+    current_phase = "skipped_existing",
+    current_detail = sprintf("using existing summary for %s", archive_member),
+    start_time = start_time,
+    total_files = total_files
+  )
+
+  manifest
+}
+
+process_local_audio_item <- function(archive_member,
+                                     input_audio_path,
+                                     file_index,
+                                     total_files,
+                                     manifest,
+                                     start_time,
+                                     ready_phase,
+                                     ready_detail,
+                                     cleanup_input = TRUE) {
   output_paths <- output_paths_for_member(output_root, archive_member)
   file_started_at <- Sys.time()
   phase_prefix <- sprintf("[%s]", progress_label(file_index, total_files))
@@ -849,86 +1156,68 @@ process_streamed_flac <- function(archive_member,
   )
 
   if (file.exists(output_paths$summary_csv)) {
-    summary_df <- safe_read_summary_csv(output_paths$summary_csv)
-    file_finished_at <- Sys.time()
-    processing_seconds <- as.numeric(difftime(file_finished_at, file_started_at, units = "secs"))
-
-    manifest <- rbind(
-      manifest,
-      data.frame(
-        archive_member = archive_member,
-        status = "skipped_existing",
-        started_at = timestamp_text(file_started_at),
-        finished_at = timestamp_text(file_finished_at),
-        processing_seconds = processing_seconds,
-        processing_time_hms = format_duration(processing_seconds),
-        recording_date = if (nrow(summary_df) > 0) substr(summary_df$date_time[1], 1, 10) else "",
-        recording_latitude = NA_real_,
-        recording_longitude = NA_real_,
-        predictions_csv = output_paths$predictions_csv,
-        summary_csv = output_paths$summary_csv,
-        summary_rows = nrow(summary_df),
-        total_species_identified = length(unique(summary_df$scientific_name)),
-        species_detected = collapse_species(summary_df),
-        error_message = "",
-        stringsAsFactors = FALSE
-      )
-    )
-
-    write.csv(manifest, manifest_csv, row.names = FALSE)
-    write_file_results_txt(manifest, file_results_txt)
-    update_live_progress(
+    manifest <- append_skipped_existing_manifest(
       manifest = manifest,
-      current_member = archive_member,
-      current_phase = "skipped_existing",
-      current_detail = sprintf("using existing summary for %s", archive_member),
-      start_time = start_time,
-      total_files = total_files
+      archive_member = archive_member,
+      output_paths = output_paths,
+      file_started_at = file_started_at,
+      total_files = total_files,
+      start_time = start_time
     )
     emit_console(sprintf("%s Skipping existing results for %s", phase_prefix, archive_member))
-    unlink(flac_path, force = TRUE)
+    if (cleanup_input && file.exists(input_audio_path)) {
+      unlink(input_audio_path, force = TRUE)
+    }
     return(manifest)
   }
 
+  wav_path <- input_audio_path
   result <- tryCatch(
     {
       update_live_progress(
         manifest = manifest,
         current_member = archive_member,
-        current_phase = "extracted_flac",
-        current_detail = sprintf("stream-extracted .flac ready: %s", basename(flac_path)),
+        current_phase = ready_phase,
+        current_detail = ready_detail,
         start_time = start_time,
         total_files = total_files
       )
 
-      wav_path <- sub("\\.flac$", ".wav", flac_path, ignore.case = TRUE)
+      input_extension <- tolower(tools::file_ext(input_audio_path))
 
-      run_monitored_command(
-        command = "ffmpeg",
-        args = c(
-          "-hide_banner",
-          "-nostats",
-          "-progress",
-          "pipe:1",
-          "-y",
-          "-i",
-          flac_path,
-          wav_path
-        ),
-        phase_prefix = phase_prefix,
-        archive_member = archive_member,
-        stage = "converting_wav",
-        start_time = start_time,
-        total_files = total_files,
-        manifest = manifest,
-        detail_text = sprintf("converting %s -> %s", basename(flac_path), basename(wav_path)),
-        heartbeat_seconds = stage_heartbeat_seconds,
-        timeout_seconds = stage_timeout_seconds,
-        detail_parser = make_ffmpeg_progress_parser(basename(flac_path), basename(wav_path))
-      )
+      if (!identical(input_extension, "wav")) {
+        wav_path <- file.path(
+          dirname(input_audio_path),
+          paste0(tools::file_path_sans_ext(basename(input_audio_path)), ".wav")
+        )
 
-      if (!file.exists(wav_path)) {
-        stop("ffmpeg completed without producing expected file: ", wav_path)
+        run_monitored_command(
+          command = "ffmpeg",
+          args = c(
+            "-hide_banner",
+            "-nostats",
+            "-progress",
+            "pipe:1",
+            "-y",
+            "-i",
+            input_audio_path,
+            wav_path
+          ),
+          phase_prefix = phase_prefix,
+          archive_member = archive_member,
+          stage = "converting_wav",
+          start_time = start_time,
+          total_files = total_files,
+          manifest = manifest,
+          detail_text = sprintf("converting %s -> %s", basename(input_audio_path), basename(wav_path)),
+          heartbeat_seconds = stage_heartbeat_seconds,
+          timeout_seconds = stage_timeout_seconds,
+          detail_parser = make_ffmpeg_progress_parser(basename(input_audio_path), basename(wav_path))
+        )
+
+        if (!file.exists(wav_path)) {
+          stop("ffmpeg completed without producing expected file: ", wav_path)
+        }
       }
 
       update_live_progress(
@@ -979,12 +1268,17 @@ process_streamed_flac <- function(archive_member,
     manifest = manifest,
     current_member = archive_member,
     current_phase = "cleaning_temp",
-    current_detail = sprintf("cleaning temporary .flac/.wav for %s", archive_member),
+    current_detail = sprintf("cleaning temporary audio files for %s", archive_member),
     start_time = start_time,
     total_files = total_files
   )
-  unlink(flac_path, force = TRUE)
-  unlink(sub("\\.flac$", ".wav", flac_path, ignore.case = TRUE), force = TRUE)
+  if (cleanup_input && file.exists(input_audio_path)) {
+    unlink(input_audio_path, force = TRUE)
+  }
+  if (!identical(normalizePath(wav_path, winslash = "/", mustWork = FALSE), normalizePath(input_audio_path, winslash = "/", mustWork = FALSE)) &&
+      file.exists(wav_path)) {
+    unlink(wav_path, force = TRUE)
+  }
 
   file_finished_at <- Sys.time()
   processing_seconds <- as.numeric(difftime(file_finished_at, file_started_at, units = "secs"))
@@ -1044,6 +1338,25 @@ process_streamed_flac <- function(archive_member,
   manifest
 }
 
+process_streamed_flac <- function(archive_member,
+                                  flac_path,
+                                  file_index,
+                                  total_files,
+                                  manifest,
+                                  start_time) {
+  process_local_audio_item(
+    archive_member = archive_member,
+    input_audio_path = flac_path,
+    file_index = file_index,
+    total_files = total_files,
+    manifest = manifest,
+    start_time = start_time,
+    ready_phase = "extracted_flac",
+    ready_detail = sprintf("stream-extracted audio ready: %s", basename(flac_path)),
+    cleanup_input = TRUE
+  )
+}
+
 dir.create(output_root, recursive = TRUE, showWarnings = FALSE)
 start_time <- Sys.time()
 total_files <- 0L
@@ -1073,122 +1386,216 @@ write_file_results_txt(manifest, file_results_txt)
 write_summary_of_summaries_txt(
   manifest = manifest,
   output_path = summary_of_summaries_txt,
-  archive_file = archive_file,
+  source_description = source_description,
   current_member = "",
   current_phase = "starting",
-  current_detail = "initializing archive run",
+  current_detail = if (identical(source_mode, "archive")) "initializing archive run" else "initializing EcoSounds run",
   current_file_progress = 0,
   start_time = start_time,
   total_files = total_files
 )
 
-emit_console("Starting archive run")
-emit_console(sprintf("Archive: %s", archive_file))
-emit_console("Streaming archive members; processing starts as soon as a .flac is found")
+emit_console("Starting BirdNET source processing run")
+emit_console(sprintf("Source: %s", source_description))
 emit_console(sprintf("Progress summary text: %s", summary_of_summaries_txt))
 emit_console(sprintf("Per-file results text: %s", file_results_txt))
 
 unlink(extract_root, recursive = TRUE, force = TRUE)
 dir.create(extract_root, recursive = TRUE, showWarnings = FALSE)
 
-stream_helper <- processx::process$new(
-  command = "python",
-  args = c(
-    file.path(script_dir, "stream_archive_flacs.py"),
-    archive_file,
-    extract_root,
-    as.character(stage_heartbeat_seconds)
-  ),
-  stdin = "|",
-  stdout = "|",
-  stderr = "|",
-  cleanup_tree = TRUE
-)
+if (identical(source_mode, "archive")) {
+  emit_console("Streaming archive members; processing starts as soon as a .flac is found")
 
-on.exit({
-  if (exists("stream_helper") && stream_helper$is_alive()) {
-    try(stream_helper$write_input("STOP\n"), silent = TRUE)
-    try(stream_helper$kill_tree(), silent = TRUE)
-  }
-}, add = TRUE)
+  stream_helper <- processx::process$new(
+    command = "python",
+    args = c(
+      file.path(script_dir, "stream_archive_flacs.py"),
+      archive_file,
+      extract_root,
+      as.character(stage_heartbeat_seconds)
+    ),
+    stdin = "|",
+    stdout = "|",
+    stderr = "|",
+    cleanup_tree = TRUE
+  )
 
-repeat {
-  stream_helper$poll_io(1000)
+  on.exit({
+    if (exists("stream_helper") && stream_helper$is_alive()) {
+      try(stream_helper$write_input("STOP\n"), silent = TRUE)
+      try(stream_helper$kill_tree(), silent = TRUE)
+    }
+  }, add = TRUE)
 
-  helper_stdout <- stream_helper$read_output_lines()
-  helper_stderr <- stream_helper$read_error_lines()
+  repeat {
+    stream_helper$poll_io(1000)
 
-  if (length(helper_stderr) > 0) {
-    emit_console(sprintf("[archive stream] helper stderr: %s", paste(helper_stderr, collapse = " | ")))
-  }
+    helper_stdout <- stream_helper$read_output_lines()
+    helper_stderr <- stream_helper$read_error_lines()
 
-  if (length(helper_stdout) > 0) {
-    for (line in helper_stdout) {
-      event <- parse_archive_stream_event(line)
+    if (length(helper_stderr) > 0) {
+      emit_console(sprintf("[archive stream] helper stderr: %s", paste(helper_stderr, collapse = " | ")))
+    }
 
-      if (identical(event$event, "SCAN")) {
-        members_seen <- event$members_seen
-        total_files <- max(total_files, event$flac_found_so_far)
-        detail_text <- sprintf(
-          "streaming archive | members_seen=%d | flac_found_so_far=%d | latest_member=%s",
-          event$members_seen,
-          event$flac_found_so_far,
-          event$latest_member
-        )
-        emit_console(sprintf("[archive stream] %s", detail_text))
-        update_live_progress(
-          manifest = manifest,
-          current_member = "",
-          current_phase = "listing_archive",
-          current_detail = detail_text,
-          start_time = start_time,
-          total_files = total_files
-        )
-      } else if (identical(event$event, "FILE")) {
-        members_seen <- event$members_seen
-        total_files <- max(total_files, event$flac_found_so_far)
-        manifest <- process_streamed_flac(
-          archive_member = event$archive_member,
-          flac_path = event$flac_path,
-          file_index = event$flac_found_so_far,
-          total_files = total_files,
-          manifest = manifest,
-          start_time = start_time
-        )
-        stream_helper$write_input("NEXT\n")
-      } else if (identical(event$event, "COMPLETE")) {
-        members_seen <- event$members_seen
-        total_files <- event$flac_found_so_far
-        scan_complete <- TRUE
-        emit_console(sprintf("Archive stream complete. Members seen: %d, flac files found: %d", members_seen, total_files))
-        update_live_progress(
-          manifest = manifest,
-          current_member = "",
-          current_phase = "starting",
-          current_detail = sprintf("archive stream complete; discovered %d .flac files", total_files),
-          start_time = start_time,
-          total_files = total_files
-        )
-      } else if (identical(event$event, "ERROR")) {
-        stop(event$error_message)
+    if (length(helper_stdout) > 0) {
+      for (line in helper_stdout) {
+        event <- parse_archive_stream_event(line)
+
+        if (identical(event$event, "SCAN")) {
+          members_seen <- event$members_seen
+          total_files <- max(total_files, event$flac_found_so_far)
+          detail_text <- sprintf(
+            "streaming archive | members_seen=%d | flac_found_so_far=%d | latest_member=%s",
+            event$members_seen,
+            event$flac_found_so_far,
+            event$latest_member
+          )
+          emit_console(sprintf("[archive stream] %s", detail_text))
+          update_live_progress(
+            manifest = manifest,
+            current_member = "",
+            current_phase = "listing_archive",
+            current_detail = detail_text,
+            start_time = start_time,
+            total_files = total_files
+          )
+        } else if (identical(event$event, "FILE")) {
+          members_seen <- event$members_seen
+          total_files <- max(total_files, event$flac_found_so_far)
+          manifest <- process_streamed_flac(
+            archive_member = event$archive_member,
+            flac_path = event$flac_path,
+            file_index = event$flac_found_so_far,
+            total_files = total_files,
+            manifest = manifest,
+            start_time = start_time
+          )
+          stream_helper$write_input("NEXT\n")
+        } else if (identical(event$event, "COMPLETE")) {
+          members_seen <- event$members_seen
+          total_files <- event$flac_found_so_far
+          scan_complete <- TRUE
+          emit_console(sprintf("Archive stream complete. Members seen: %d, flac files found: %d", members_seen, total_files))
+          update_live_progress(
+            manifest = manifest,
+            current_member = "",
+            current_phase = "starting",
+            current_detail = sprintf("archive stream complete; discovered %d .flac files", total_files),
+            start_time = start_time,
+            total_files = total_files
+          )
+        } else if (identical(event$event, "ERROR")) {
+          stop(event$error_message)
+        }
       }
+    }
+
+    if (!stream_helper$is_alive()) {
+      break
     }
   }
 
-  if (!stream_helper$is_alive()) {
-    break
-  }
-}
-
-if (!scan_complete) {
-  final_status <- stream_helper$get_exit_status()
-  if (!identical(final_status, 0L)) {
-    helper_tail <- c(stream_helper$read_output_lines(), stream_helper$read_error_lines())
-    stop(
-      paste(
-        c("archive stream helper failed", utils::tail(helper_tail, 20)),
-        collapse = "\n"
+  if (!scan_complete) {
+    final_status <- stream_helper$get_exit_status()
+    if (!identical(final_status, 0L)) {
+      helper_tail <- c(stream_helper$read_output_lines(), stream_helper$read_error_lines())
+      stop(
+        paste(
+          c("archive stream helper failed", utils::tail(helper_tail, 20)),
+          collapse = "\n"
+        )
       )
+    }
+  }
+} else {
+  emit_console(sprintf("Listing recordings from EcoSounds project %s", as.integer(ecosounds_project_id)))
+  ecosounds_token <- ecosounds_get_auth_token(
+    workbench_url = ecosounds_workbench_url,
+    auth_token = ecosounds_auth_token,
+    user_name = ecosounds_user_name,
+    password = ecosounds_password
+  )
+  recordings <- list_ecosounds_recordings(
+    workbench_url = ecosounds_workbench_url,
+    auth_token = ecosounds_token,
+    project_id = ecosounds_project_id,
+    manifest = manifest,
+    start_time = start_time
+  )
+
+  if (nrow(recordings) == 0) {
+    stop(sprintf("No accessible recordings were returned for EcoSounds project %s.", as.integer(ecosounds_project_id)))
+  }
+
+  recordings <- recordings[order(recordings$recorded_date, recordings$site_id, recordings$canonical_file_name), , drop = FALSE]
+  total_files <- nrow(recordings)
+  emit_console(sprintf("EcoSounds listing complete. Recordings found: %d", total_files))
+
+  for (recording_index in seq_len(total_files)) {
+    recording <- recordings[recording_index, , drop = FALSE]
+    archive_member <- ecosounds_archive_member(recording)
+    output_paths <- output_paths_for_member(output_root, archive_member)
+    phase_prefix <- sprintf("[%s]", progress_label(recording_index, total_files))
+
+    if (file.exists(output_paths$summary_csv)) {
+      file_started_at <- Sys.time()
+      manifest <- append_skipped_existing_manifest(
+        manifest = manifest,
+        archive_member = archive_member,
+        output_paths = output_paths,
+        file_started_at = file_started_at,
+        total_files = total_files,
+        start_time = start_time
+      )
+      emit_console(sprintf("%s Skipping existing results for %s", phase_prefix, archive_member))
+      next
+    }
+
+    emit_console(sprintf("%s [file %.1f%%] downloading %s", phase_prefix, stage_progress("downloading_audio"), archive_member))
+    update_live_progress(
+      manifest = manifest,
+      current_member = archive_member,
+      current_phase = "downloading_audio",
+      current_detail = sprintf("downloading audio from EcoSounds: %s", archive_member),
+      start_time = start_time,
+      total_files = total_files
+    )
+
+    recording_workspace <- file.path(extract_root, sprintf("recording_%s", recording[["id"]]))
+    cleanup_local_workspace(recording_workspace)
+    dir.create(recording_workspace, recursive = TRUE, showWarnings = FALSE)
+
+    downloaded_recording <- NULL
+    manifest <- tryCatch(
+      {
+        downloaded_recording <- download_ecosounds_recording(
+          recording = recording,
+          workbench_url = ecosounds_workbench_url,
+          auth_token = ecosounds_token,
+          download_root = recording_workspace
+        )
+
+        updated_manifest <- process_local_audio_item(
+          archive_member = downloaded_recording$archive_member,
+          input_audio_path = downloaded_recording$local_audio_path,
+          file_index = recording_index,
+          total_files = total_files,
+          manifest = manifest,
+          start_time = start_time,
+          ready_phase = "downloaded_audio",
+          ready_detail = sprintf("downloaded audio ready: %s", basename(downloaded_recording$local_audio_path)),
+          cleanup_input = TRUE
+        )
+
+        if (file.exists(downloaded_recording$local_audio_path)) {
+          stop(sprintf("Downloaded local audio was not removed after processing: %s", downloaded_recording$local_audio_path))
+        }
+
+        updated_manifest
+      },
+      finally = {
+        cleanup_local_workspace(recording_workspace)
+      }
     )
   }
 }
@@ -1196,14 +1603,14 @@ if (!scan_complete) {
 write_summary_of_summaries_txt(
   manifest = manifest,
   output_path = summary_of_summaries_txt,
-  archive_file = archive_file,
+  source_description = source_description,
   current_member = "",
   current_phase = "complete",
-  current_detail = "archive processing complete",
+  current_detail = "source processing complete",
   current_file_progress = 100,
   start_time = start_time,
   total_files = total_files
 )
 
-emit_console(sprintf("Archive processing complete. Manifest: %s", manifest_csv))
+emit_console(sprintf("Source processing complete. Manifest: %s", manifest_csv))
 manifest

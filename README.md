@@ -9,11 +9,12 @@ The audio-file repository is available at <a href="https://api.ecosounds.org/pro
 R-based <a href="https://birdnet.cornell.edu">BirdNET</a> workflow for:
 
 1. processing a single audio file
-2. processing a large `.tar.zst` archive one `.flac` at a time
-3. converting `.flac` to `.wav`
-4. filtering BirdNET predictions with a repository-local species list
-5. writing per-file prediction summaries and rolling progress reports
-6. post-processing existing summary CSVs into plots and aggregate tables
+2. processing a large local `.tar.zst` archive one `.flac` at a time
+3. downloading and processing original recordings directly from an authenticated EcoSounds project
+4. converting non-`.wav` source audio to `.wav`
+5. filtering BirdNET predictions with a repository-local species list
+6. writing per-file prediction summaries and rolling progress reports
+7. post-processing existing summary CSVs into plots and aggregate tables
 
 ## Repository layout
 
@@ -49,22 +50,34 @@ birdnetRpredict/
    - a filtered prediction CSV
    - a cleaned species summary CSV
 
-### Archive workflow
+### Source-processing workflow
 
 `scripts/process_tar_archive.R`:
 
-1. opens a source `.tar.zst`
-2. streams the archive sequentially instead of doing a full pre-scan
-3. starts processing as soon as the next `.flac` is encountered
-4. extracts a single `.flac` while preserving the internal archive path
-5. converts that `.flac` to `.wav` with `ffmpeg`
-6. runs the same BirdNET summary workflow used by the single-file script
-7. writes per-file CSV outputs
-8. deletes the temporary extracted `.flac` and `.wav`
-9. moves to the next archive member until the archive is complete
+The script now supports two source modes selected near the top of the file:
 
-This avoids unpacking the entire archive at once and avoids waiting for a full member enumeration before processing starts.
-macOS sidecar entries such as `._*.flac` and `__MACOSX/` metadata are skipped during archive streaming.
+1. `source_mode <- "archive"`
+   - opens a source `.tar.zst`
+   - streams the archive sequentially instead of doing a full pre-scan
+   - starts processing as soon as the next `.flac` is encountered
+   - extracts a single `.flac` while preserving the internal archive path
+   - converts that `.flac` to `.wav` with `ffmpeg`
+
+2. `source_mode <- "ecosounds"`
+   - authenticates against the EcoSounds / Acoustic Workbench API
+   - lists recordings accessible in the chosen project
+   - downloads each original recording file into a temporary local workspace one file at a time
+   - processes `.wav` recordings directly and converts other source formats to `.wav` when needed
+   - deletes the downloaded local audio immediately after that one file is analysed, before downloading the next file
+
+In both modes the script then:
+
+1. runs the same BirdNET summary workflow used by the single-file script
+2. writes per-file CSV outputs
+3. deletes temporary downloaded/extracted audio files
+4. moves to the next source item until the run is complete
+
+Archive mode still avoids unpacking the entire archive at once and avoids waiting for a full member enumeration before processing starts. macOS sidecar entries such as `._*.flac` and `__MACOSX/` metadata are skipped during archive streaming.
 
 ### Post-processing analysis workflow
 
@@ -119,7 +132,7 @@ That file is combined with the BirdNET location/week range model to reduce false
 
 ## Requirements
 
-- R packages: <code>birdnetR</code>, <code>processx</code>, <code>callr</code>
+- R packages: <code>birdnetR</code>, <code>processx</code>, <code>callr</code>, <code>jsonlite</code>
 - casks: <code>ffmpeg</code>, <code>tar</code> with <code>--zstd</code> support, <code>zstd</code>
 
 The current environment also expects BirdNET's Python dependencies to be installable through <a href="https://github.com/birdnet-team/birdnetR"><code>birdnetR</code></a>.
@@ -143,7 +156,13 @@ Edit:
 
 Edit:
 
+- `source_mode`
 - `archive_file`
+- `ecosounds_workbench_url`
+- `ecosounds_project_id`
+- `ecosounds_auth_token`
+- `ecosounds_user_name`
+- `ecosounds_password`
 - `species_csv`
 - `fallback_latitude`
 - `fallback_longitude`
@@ -152,7 +171,15 @@ Edit:
 - `stage_heartbeat_seconds`
 - `stage_timeout_seconds`
 
-These control which archive is processed, which species filter is used, and how strict the prediction summaries are.
+These control whether the script processes a local archive or an authenticated EcoSounds project, which species filter is used, and how strict the prediction summaries are.
+
+For EcoSounds access, prefer supplying credentials through environment variables rather than storing secrets in the script:
+
+- `ECOSOUNDS_AUTH_TOKEN`
+- `ECOSOUNDS_USERNAME`
+- `ECOSOUNDS_PASSWORD`
+
+If `ECOSOUNDS_AUTH_TOKEN` is supplied, the script uses it directly. Otherwise it logs in with `ECOSOUNDS_USERNAME` + `ECOSOUNDS_PASSWORD` and then downloads recordings from the selected project.
 
 ### `scripts/analyse_birdnet_output.R`
 
@@ -177,9 +204,17 @@ These control which existing summary CSVs are included, where the analysis outpu
 Rscript scripts/birdnetID.R
 ```
 
-### Archive pipeline
+### Source-processing pipeline
 
 ```bash
+Rscript scripts/process_tar_archive.R
+```
+
+With `source_mode <- "ecosounds"`, make sure your EcoSounds credentials are available first, for example:
+
+```bash
+export ECOSOUNDS_USERNAME="your_username"
+export ECOSOUNDS_PASSWORD="your_password"
 Rscript scripts/process_tar_archive.R
 ```
 
@@ -212,13 +247,13 @@ The summary CSV contains:
 
 ### Archive-level outputs
 
-For archive runs, output is written under:
+For source-processing runs, output is written under:
 
 ```text
-out/<archive_name>_birdnet_output/
+out/<source_name>_birdnet_output/
 ```
 
-The archive workflow writes:
+The source-processing workflow writes:
 
 - `*_processing_manifest.csv`  
   machine-readable log of file-by-file outcomes
@@ -229,7 +264,8 @@ The archive workflow writes:
 - `*_summary_of_summaries.txt`  
   continually updated overall run summary, including progress, current file, current phase, elapsed time, ETA, and cumulative species count
 
-All archive outputs are written to the local repository drive, not back to the source archive drive.
+All source-processing outputs are written to the local repository drive, not back to the source archive drive or remote EcoSounds repository.
+In EcoSounds mode, the workflow does **not** build up a local cache of all recordings first; it downloads one source audio file, analyses it locally, deletes the temporary local audio, and only then moves to the next recording.
 
 ### Analysis outputs
 
@@ -391,14 +427,14 @@ Interpretation in this workflow:
 - larger Simpson and Hill <em>q</em>  = 2 indicate greater diversity with stronger weighting toward the most frequently detected species
 - because the pipeline uses detections rather than direct counts of individuals, these are diversity estimates based on the assumption that detection frequency is a reasonable proxy for relative abundance
 
-## Console progress during archive runs
+## Console progress during source-processing runs
 
 When `Rscript scripts/process_tar_archive.R` is running, the console reports:
 
 - current file index and percent complete
 - current per-file stage percent
-- current archive member being processed
-- archive streaming progress
+- current source item being processed
+- archive streaming progress or EcoSounds listing progress
 - extraction/download step
 - `.flac` to `.wav` conversion step
 - BirdNET range-filter step
@@ -408,13 +444,13 @@ When `Rscript scripts/process_tar_archive.R` is running, the console reports:
 - per-file elapsed time
 - estimated time remaining
 
-Archive streaming, extraction, and conversion stages are monitored through `processx`, so they emit recurring heartbeat updates instead of staying silent until the subprocess returns.
+Archive streaming, EcoSounds downloads, extraction, and conversion stages are monitored through `processx`, so they emit recurring heartbeat updates instead of staying silent until the subprocess returns.
 
 BirdNET analysis is also run in a monitored child R process through <code>callr</code>, so TensorFlow/TFLite warnings should no longer make the main console progress appear frozen.
 
 ## Resume behaviour
 
-The archive script is restart-friendly.
+The source-processing script is restart-friendly.
 
 If a file's summary CSV already exists, that file is skipped and logged as:
 
@@ -422,7 +458,8 @@ If a file's summary CSV already exists, that file is skipped and logged as:
 skipped_existing
 ```
 
-This allows rerunning the script after interruption without reprocessing every file.
+This allows rerunning the script after interruption without reprocessing every file, regardless of whether the source is a local archive or EcoSounds.
+In EcoSounds mode, restart/skip behavior is keyed to stable recording IDs in the output path, so already processed recordings are skipped on rerun before any fresh download is attempted.
 
 ## Contingencies and failure behaviour
 
@@ -456,25 +493,25 @@ If `ffmpeg` fails to convert a `.flac`, the file is recorded as:
 
 - `error`
 
-and processing continues to the next archive member.
+and processing continues to the next source item.
 
-### 7. Archive extraction failure
+### 7. Archive extraction or EcoSounds download failure
 
-If `tar --zstd` fails for a specific member, that file is recorded as:
+If `tar --zstd` fails for a specific member, or an authenticated EcoSounds download fails for a specific recording, that file is recorded as:
 
 - `error`
 
 and processing continues.
 
-### 8. Slow extraction from `.tar.zst`
+### 8. Slow extraction from `.tar.zst` or slow remote downloads
 
-This workflow extracts one archive member at a time. For compressed `.tar.zst` archives, that can still be slow because `tar` may need to scan or decompress a large portion of the archive to reach a later member.
+This workflow extracts one archive member at a time in archive mode, and downloads one recording at a time in EcoSounds mode. For compressed `.tar.zst` archives, extraction can still be slow because `tar` may need to scan or decompress a large portion of the archive to reach a later member.
 
-That means a file can legitimately spend a long time in the extraction/download stage even when it is not frozen. The script now emits heartbeat updates during that stage so you can tell the process is still alive.
+That means a file can legitimately spend a long time in the extraction/download stage even when it is not frozen. The script emits heartbeat updates during that stage so you can tell the process is still alive.
 
 ### 9. Slow BirdNET inference
 
-BirdNET model startup and inference can also take a long time, especially on the first files of a run while Python/model dependencies initialize. The archive runner now polls that stage from a child R process and keeps updating console and text progress during analysis.
+BirdNET model startup and inference can also take a long time, especially on the first files of a run while Python/model dependencies initialize. The source-processing runner polls that stage from a child R process and keeps updating console and text progress during analysis.
 
 ### 10. Interrupted runs
 
@@ -489,5 +526,7 @@ Files with existing summary outputs skipped automatically.
 ## Notes
 
 - temporary extracted `.flac` and converted `.wav` files deleted after each file is processed
+- in EcoSounds mode, each downloaded recording is stored in a per-recording temporary workspace that is removed before the next download begins
 - helper functions live in `scripts/birdnet_helpers.R`
-- archive processor mirrors the archive subdirectory structure in the output folder when writing per-file CSV results
+- archive mode mirrors the archive subdirectory structure in the output folder when writing per-file CSV results
+- EcoSounds mode writes outputs under stable `site_<site_id>/recording_<recording_id>_...` paths so interrupted runs can resume cleanly and skip already processed recordings

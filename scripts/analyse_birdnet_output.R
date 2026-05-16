@@ -2,6 +2,7 @@
 analysis_timezone <- "Australia/Adelaide"
 bin_minutes <- 60
 top_species_time_bin_minutes <- 24 * 60
+rolling_mean_window_days <- 7
 min_confidence <- 0.1
 periodicity_max_lag_bins <- 48L
 show_plots_in_session <- TRUE
@@ -368,12 +369,50 @@ build_monthly_diversity_long <- function(monthly_diversity_summary) {
   )
 }
 
-build_time_series_summary_for_subset <- function(detections_subset, bin_minutes, timezone) {
+add_running_mean_to_time_series <- function(time_series_summary, bin_minutes, running_days = 7) {
+  if (nrow(time_series_summary) == 0) {
+    time_series_summary$identification_count_running_mean <- numeric()
+    time_series_summary$identification_count_plot <- numeric()
+    time_series_summary$identification_count_running_mean_plot <- numeric()
+    return(time_series_summary)
+  }
+
+  window_bins <- max(1L, as.integer(round((running_days * 24 * 60) / bin_minutes)))
+  counts <- as.numeric(time_series_summary$identification_count)
+  cumulative_counts <- c(0, cumsum(counts))
+  running_mean <- vapply(
+    seq_along(counts),
+    function(index) {
+      start_index <- max(1L, index - window_bins + 1L)
+      total_count <- cumulative_counts[index + 1L] - cumulative_counts[start_index]
+      total_count / (index - start_index + 1L)
+    },
+    numeric(1)
+  )
+
+  time_series_summary$identification_count_running_mean <- running_mean
+  time_series_summary$identification_count_plot <- ifelse(
+    time_series_summary$identification_count > 0,
+    time_series_summary$identification_count,
+    NA_real_
+  )
+  time_series_summary$identification_count_running_mean_plot <- ifelse(
+    time_series_summary$identification_count_running_mean > 0,
+    time_series_summary$identification_count_running_mean,
+    NA_real_
+  )
+  time_series_summary
+}
+
+build_time_series_summary_for_subset <- function(detections_subset, bin_minutes, timezone, rolling_mean_window_days = 7) {
   if (nrow(detections_subset) == 0) {
     return(data.frame(
       time_bin = as.POSIXct(character()),
       identification_count = integer(),
-      unique_species_count = integer()
+      unique_species_count = integer(),
+      identification_count_running_mean = numeric(),
+      identification_count_plot = numeric(),
+      identification_count_running_mean_plot = numeric()
     ))
   }
 
@@ -415,7 +454,12 @@ build_time_series_summary_for_subset <- function(detections_subset, bin_minutes,
   )
   time_series_summary$identification_count[is.na(time_series_summary$identification_count)] <- 0L
   time_series_summary$unique_species_count[is.na(time_series_summary$unique_species_count)] <- 0L
-  time_series_summary[order(time_series_summary$time_bin), , drop = FALSE]
+  time_series_summary <- time_series_summary[order(time_series_summary$time_bin), , drop = FALSE]
+  add_running_mean_to_time_series(
+    time_series_summary,
+    bin_minutes = bin_minutes,
+    running_days = rolling_mean_window_days
+  )
 }
 
 build_cumulative_new_species_for_subset <- function(detections_subset, bin_minutes, timezone) {
@@ -1008,6 +1052,7 @@ write_analysis_summary <- function(summary_txt,
                                    summary_root,
                                    output_dir,
                                    bin_minutes,
+                                   rolling_mean_window_days,
                                    min_confidence,
                                    file_status,
                                    filtered_detections) {
@@ -1022,6 +1067,7 @@ write_analysis_summary <- function(summary_txt,
     sprintf("summary root: %s", summary_root),
     sprintf("output directory: %s", output_dir),
     sprintf("temporal bin size (minutes): %s", bin_minutes),
+    sprintf("rolling mean window (days): %s", rolling_mean_window_days),
     sprintf("minimum confidence threshold: %.3f", min_confidence),
     sprintf("summary CSV files discovered: %d", nrow(file_status)),
     sprintf("summary CSV files loaded successfully: %d", sum(file_status$read_status == "ok")),
@@ -1088,6 +1134,11 @@ if (!is.numeric(top_species_time_bin_minutes) || length(top_species_time_bin_min
   stop("top_species_time_bin_minutes must be a single positive number")
 }
 
+if (!is.numeric(rolling_mean_window_days) || length(rolling_mean_window_days) != 1 ||
+    is.na(rolling_mean_window_days) || rolling_mean_window_days <= 0) {
+  stop("rolling_mean_window_days must be a single positive number")
+}
+
 if (!is.numeric(min_confidence) || length(min_confidence) != 1 || is.na(min_confidence) ||
     min_confidence < 0 || min_confidence > 1) {
   stop("min_confidence must be a single number between 0 and 1")
@@ -1104,6 +1155,7 @@ if (!is.logical(show_plots_in_session) || length(show_plots_in_session) != 1 || 
 
 bin_minutes <- as.numeric(bin_minutes)
 top_species_time_bin_minutes <- as.numeric(top_species_time_bin_minutes)
+rolling_mean_window_days <- as.numeric(rolling_mean_window_days)
 min_confidence <- as.numeric(min_confidence)
 periodicity_max_lag_bins <- as.integer(periodicity_max_lag_bins)
 
@@ -1221,6 +1273,11 @@ time_series_summary <- merge(
 time_series_summary$identification_count[is.na(time_series_summary$identification_count)] <- 0L
 time_series_summary$unique_species_count[is.na(time_series_summary$unique_species_count)] <- 0L
 time_series_summary <- time_series_summary[order(time_series_summary$time_bin), , drop = FALSE]
+time_series_summary <- add_running_mean_to_time_series(
+  time_series_summary,
+  bin_minutes = bin_minutes,
+  running_days = rolling_mean_window_days
+)
 
 first_detections <- filtered_detections[!duplicated(filtered_detections$scientific_name), , drop = FALSE]
 first_detections <- first_detections[order(first_detections$date_time, first_detections$scientific_name), , drop = FALSE]
@@ -1389,7 +1446,12 @@ time_series_by_recorder <- do.call(
   rbind,
   lapply(recorder_ids, function(recorder_id) {
     subset_detections <- filtered_detections[filtered_detections$recorder_id == recorder_id, , drop = FALSE]
-    subset_time_series <- build_time_series_summary_for_subset(subset_detections, bin_minutes, analysis_timezone)
+    subset_time_series <- build_time_series_summary_for_subset(
+      subset_detections,
+      bin_minutes,
+      analysis_timezone,
+      rolling_mean_window_days = rolling_mean_window_days
+    )
     subset_time_series$recorder_id <- recorder_id
     subset_time_series
   })
@@ -1608,6 +1670,7 @@ write_analysis_summary(
   summary_root = summary_root,
   output_dir = output_dir,
   bin_minutes = bin_minutes,
+  rolling_mean_window_days = rolling_mean_window_days,
   min_confidence = min_confidence,
   file_status = file_status,
   filtered_detections = filtered_detections
@@ -1618,17 +1681,28 @@ plot_subtitle <- sprintf(
   as.integer(round(bin_minutes)),
   min_confidence
 )
+time_series_plot_subtitle <- paste0(
+  plot_subtitle,
+  sprintf(" | red line = %.3g-day running mean", rolling_mean_window_days)
+)
 
 time_series_plot <- ggplot2::ggplot(
   time_series_summary,
-  ggplot2::aes(x = time_bin, y = identification_count)
+  ggplot2::aes(x = time_bin, y = identification_count_plot)
 ) +
-  ggplot2::geom_col(fill = "steelblue", width = bin_minutes * 60 * 0.9) +
+  ggplot2::geom_col(fill = "steelblue", width = bin_minutes * 60 * 0.9, na.rm = TRUE) +
+  ggplot2::geom_line(
+    ggplot2::aes(y = identification_count_running_mean_plot),
+    colour = "firebrick2",
+    linewidth = 1,
+    na.rm = TRUE
+  ) +
+  ggplot2::scale_y_log10() +
   ggplot2::labs(
     title = "BirdNET identifications over time",
-    subtitle = plot_subtitle,
+    subtitle = time_series_plot_subtitle,
     x = "time bin",
-    y = "identifications per bin"
+    y = expression("identifications per bin (" * log[10] * " scale)")
   ) +
   analysis_plot_theme()
 
@@ -1742,15 +1816,22 @@ top_species_plot <- ggplot2::ggplot(
 
 time_series_by_recorder_plot <- ggplot2::ggplot(
   time_series_by_recorder,
-  ggplot2::aes(x = time_bin, y = identification_count)
+  ggplot2::aes(x = time_bin, y = identification_count_plot)
 ) +
-  ggplot2::geom_col(fill = "steelblue", width = bin_minutes * 60 * 0.9) +
+  ggplot2::geom_col(fill = "steelblue", width = bin_minutes * 60 * 0.9, na.rm = TRUE) +
+  ggplot2::geom_line(
+    ggplot2::aes(y = identification_count_running_mean_plot),
+    colour = "firebrick2",
+    linewidth = 0.9,
+    na.rm = TRUE
+  ) +
   ggplot2::facet_grid(recorder_id ~ ., scales = "free_y") +
+  ggplot2::scale_y_log10() +
   ggplot2::labs(
     title = "BirdNET identifications over time by recorder",
-    subtitle = plot_subtitle,
+    subtitle = time_series_plot_subtitle,
     x = "time bin",
-    y = "identifications per bin"
+    y = expression("identifications per bin (" * log[10] * " scale)")
   ) +
   analysis_plot_theme()
 
@@ -2085,14 +2166,21 @@ for (recorder_id in recorder_ids) {
 
   recorder_time_series_plot <- ggplot2::ggplot(
     recorder_time_series,
-    ggplot2::aes(x = time_bin, y = identification_count)
+    ggplot2::aes(x = time_bin, y = identification_count_plot)
   ) +
-    ggplot2::geom_col(fill = "steelblue", width = bin_minutes * 60 * 0.9) +
+    ggplot2::geom_col(fill = "steelblue", width = bin_minutes * 60 * 0.9, na.rm = TRUE) +
+    ggplot2::geom_line(
+      ggplot2::aes(y = identification_count_running_mean_plot),
+      colour = "firebrick2",
+      linewidth = 1,
+      na.rm = TRUE
+    ) +
+    ggplot2::scale_y_log10() +
     ggplot2::labs(
       title = sprintf("BirdNET identifications over time: %s", recorder_id),
-      subtitle = plot_subtitle,
+      subtitle = time_series_plot_subtitle,
       x = "time bin",
-      y = "identifications per bin"
+      y = expression("identifications per bin (" * log[10] * " scale)")
     ) +
     analysis_plot_theme()
 

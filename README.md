@@ -189,6 +189,7 @@ Edit the user-defined settings directly near the top of the script:
 - `analysis_timezone`
 - `bin_minutes`
 - `top_species_time_bin_minutes`
+- `rolling_mean_window_days`
 - `min_confidence`
 - `periodicity_max_lag_bins`
 - `show_plots_in_session`
@@ -371,6 +372,7 @@ The analysis workflow writes:
 
 In the species-frequency plots, the identification axis is shown on a log<sub>10</sub> scale, and common names are displayed in lowercase except where proper nouns remain capitalised. Latin names are italicised in the species-axis labels.
 The root-level analysis figures are the combined overall results across all recorders currently present in `out/`. Additional recorder-comparison figures are written as multi-panel plots, and recorder-specific figures are written into the `recorders/` subdirectory as each recorder becomes available.
+The detections-over-time plots now use a log<sub>10</sub> y-axis and include a red trailing running mean over the raw per-bin counts, controlled by `rolling_mean_window_days` in the user-defined settings block.
 Monthly diversity metrics treat the number of detections per species as the abundance proxy for Shannon, Simpson, and Hill-number calculations, and are produced as overall combined figures, recorder-specific figures, and recorder-comparison figures.
 The top-species time-series plots default to 24-hour bins through `top_species_time_bin_minutes <- 24 × 60`, but that bin size can be changed directly in `scripts/analyse_birdnet_output.R`.
 In the recorder-comparison diversity figure, each recorder-by-metric panel now uses its own y-axis range so Shannon, Simpson, and Hill-number panels are scaled to their local maxima.

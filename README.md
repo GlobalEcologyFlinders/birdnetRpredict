@@ -65,11 +65,12 @@ The script now supports two source modes selected near the top of the file:
    - converts that `.flac` to `.wav` with `ffmpeg`
 
 2. `source_mode <- "ecosounds"`
-   - authenticates against the EcoSounds / Acoustic Workbench API
-   - lists recordings accessible in the chosen project
-   - downloads each original recording file into a temporary local workspace one file at a time
-   - processes `.wav` recordings directly and converts other source formats to `.wav` when needed
-   - deletes the downloaded local audio immediately after that one file is analysed, before downloading the next file
+    - authenticates against the EcoSounds / Acoustic Workbench API
+    - lists only the recordings accessible in the chosen project and matching the selected recorder/site filter
+    - can optionally restrict processing to a single recorder/site in the user-defined settings
+    - downloads each original recording file into a temporary local workspace one file at a time
+    - processes `.wav` recordings directly and converts other source formats to `.wav` when needed
+    - deletes the downloaded local audio immediately after that one file is analysed, before downloading the next file
 
 In both modes the script then:
 
@@ -161,6 +162,8 @@ Edit:
 - `archive_file`
 - `ecosounds_workbench_url`
 - `ecosounds_project_id`
+- `ecosounds_recorder_id`
+- `ecosounds_recorder_name`
 - `ecosounds_auth_token`
 - `ecosounds_user_name`
 - `ecosounds_password`
@@ -172,7 +175,7 @@ Edit:
 - `stage_heartbeat_seconds`
 - `stage_timeout_seconds`
 
-These control whether the script processes a local archive or an authenticated EcoSounds project, which species filter is used, and how strict the prediction summaries are.
+These control whether the script processes a local archive or an authenticated EcoSounds project, which single EcoSounds recorder/site is included (if any), which species filter is used, and how strict the prediction summaries are.
 
 For EcoSounds access, prefer supplying credentials through environment variables rather than storing secrets in the script:
 
@@ -181,6 +184,13 @@ For EcoSounds access, prefer supplying credentials through environment variables
 - `ECOSOUNDS_PASSWORD`
 
 If `ECOSOUNDS_AUTH_TOKEN` is supplied, the script uses it directly. Otherwise it logs in with `ECOSOUNDS_USERNAME` + `ECOSOUNDS_PASSWORD` and then downloads recordings from the selected project.
+
+To process only one EcoSounds recorder at a time, set one of these near the top of `scripts/process_tar_archive.R`:
+
+- `ecosounds_recorder_id <- 7238L` for the `GEL_A` EcoSounds site in project `1281`
+- `ecosounds_recorder_name <- "GEL_A"` for an exact recorder/site name match when you know the API site name matches that label
+
+The EcoSounds listing request itself is restricted to that recorder/site before files are queued for download. Leave both empty if you want the whole project. Do not set both at once.
 
 ### `scripts/analyse_birdnet_output.R`
 
@@ -219,6 +229,8 @@ export ECOSOUNDS_USERNAME="your_username"
 export ECOSOUNDS_PASSWORD="your_password"
 Rscript scripts/process_tar_archive.R
 ```
+
+Or set `ecosounds_auth_token`, `ecosounds_user_name`, and `ecosounds_password` directly in the user-defined settings block before running the script.
 
 ### Post-processing analysis
 

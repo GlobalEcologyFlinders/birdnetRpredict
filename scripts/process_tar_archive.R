@@ -1,11 +1,16 @@
 # user-defined settings ----------------------------------------------------
-source_mode <- "archive"  # "archive" or "ecosounds"
+source_mode <- "ecosounds"  # "archive" or "ecosounds"
 
 archive_file <- "/Volumes/bradshaw/acoustic/GEL_A/GEL_A202508202025_12312025.tar.zst"
 ecosounds_workbench_url <- "https://api.ecosounds.org"
 ecosounds_project_id <- 1281L
-ecosounds_auth_token <- Sys.getenv("ECOSOUNDS_AUTH_TOKEN", unset = "")
-ecosounds_user_name <- Sys.getenv("ECOSOUNDS_USERNAME", unset = "")
+
+# EcoSounds site/recorder ID; GEL_A is project 1281 site 7238;
+# GEL_B is site 7239; GEL_C is site 7240; GEL_D is site 7241; GEL_E is site 7242
+ecosounds_recorder_id <- 7238L  
+ecosounds_recorder_name <- ""  # exact EcoSounds site/recorder name; use this instead of ecosounds_recorder_id if preferred
+ecosounds_auth_token <- trimws(Sys.getenv("ECOSOUNDS_AUTH_TOKEN", unset = ""))
+ecosounds_user_name <- trimws(Sys.getenv("ECOSOUNDS_USERNAME", unset = ""))
 ecosounds_password <- Sys.getenv("ECOSOUNDS_PASSWORD", unset = "")
 # -------------------------------------------------------------------------
 
@@ -152,17 +157,109 @@ ecosounds_archive_member <- function(recording) {
   )
 }
 
-ecosounds_filter_object <- function(project_id) {
+normalise_optional_integer <- function(value, setting_name) {
+  if (length(value) == 0 || is.null(value) || all(is.na(value))) {
+    return(NA_integer_)
+  }
+
+  candidate <- trimws(as.character(value[[1]]))
+
+  if (!nzchar(candidate)) {
+    return(NA_integer_)
+  }
+
+  integer_value <- suppressWarnings(as.integer(candidate))
+
+  if (is.na(integer_value)) {
+    stop(sprintf("%s must be left empty/NA or set to a whole-number EcoSounds recorder ID.", setting_name))
+  }
+
+  integer_value
+}
+
+normalise_optional_text <- function(value) {
+  if (length(value) == 0 || is.null(value) || all(is.na(value))) {
+    return("")
+  }
+
+  trimws(as.character(value[[1]]))
+}
+
+ecosounds_filter_object <- function(project_id,
+                                    recorder_id = NA_integer_,
+                                    recorder_name = "") {
+  recorder_id <- normalise_optional_integer(recorder_id, "ecosounds_recorder_id")
+  recorder_name <- normalise_optional_text(recorder_name)
+
+  if (!is.na(recorder_id) && nzchar(recorder_name)) {
+    stop("Set only one of ecosounds_recorder_id or ecosounds_recorder_name.")
+  }
+
+  and_filters <- list(
+    "projects.id" = list(eq = as.integer(project_id))
+  )
+
+  if (!is.na(recorder_id)) {
+    and_filters[["sites.id"]] <- list(eq = recorder_id)
+  }
+
+  if (nzchar(recorder_name)) {
+    and_filters[["sites.name"]] <- list(eq = recorder_name)
+  }
+
   list(
-    filter = list(
-      and = list(
-        "projects.id" = list(eq = as.integer(project_id))
-      )
-    ),
+    filter = list(and = and_filters),
     projection = list(
       only = c("id", "recorded_date", "sites.name", "site_id", "canonical_file_name")
     )
   )
+}
+
+filter_ecosounds_recordings <- function(recordings,
+                                        recorder_id = NA_integer_,
+                                        recorder_name = "") {
+  recorder_id <- normalise_optional_integer(recorder_id, "ecosounds_recorder_id")
+  recorder_name <- normalise_optional_text(recorder_name)
+
+  if (!is.na(recorder_id) && nzchar(recorder_name)) {
+    stop("Set only one of ecosounds_recorder_id or ecosounds_recorder_name.")
+  }
+
+  if (nrow(recordings) == 0) {
+    return(recordings)
+  }
+
+  if (!is.na(recorder_id)) {
+    if (!"site_id" %in% names(recordings)) {
+      stop("EcoSounds listing did not include site_id, so ecosounds_recorder_id cannot be applied.")
+    }
+
+    filtered <- recordings[recordings$site_id == recorder_id, , drop = FALSE]
+
+    if (nrow(filtered) == 0) {
+      stop(sprintf("No EcoSounds recordings matched ecosounds_recorder_id = %s in project %s.", recorder_id, as.integer(ecosounds_project_id)))
+    }
+
+    return(filtered)
+  }
+
+  if (nzchar(recorder_name)) {
+    name_column <- "sites.name"
+
+    if (!name_column %in% names(recordings)) {
+      stop("EcoSounds listing did not include sites.name, so ecosounds_recorder_name cannot be applied.")
+    }
+
+    filtered <- recordings[trimws(as.character(recordings[[name_column]])) == recorder_name, , drop = FALSE]
+
+    if (nrow(filtered) == 0) {
+      stop(sprintf("No EcoSounds recordings matched ecosounds_recorder_name = '%s' in project %s.", recorder_name, as.integer(ecosounds_project_id)))
+    }
+
+    return(filtered)
+  }
+
+  recordings
 }
 
 run_curl_request <- function(url,
@@ -210,8 +307,10 @@ ecosounds_get_auth_token <- function(workbench_url, auth_token = "", user_name =
   if (!nzchar(user_name) || !nzchar(password)) {
     stop(
       paste(
-        "EcoSounds access requires either ecosounds_auth_token,",
-        "or both ecosounds_user_name and ecosounds_password."
+        "EcoSounds access requires credentials in the user-defined settings or environment variables.",
+        "Set ecosounds_auth_token (or ECOSOUNDS_AUTH_TOKEN),",
+        "or set both ecosounds_user_name + ecosounds_password",
+        "(or ECOSOUNDS_USERNAME + ECOSOUNDS_PASSWORD)."
       )
     )
   }
@@ -246,6 +345,8 @@ ecosounds_get_auth_token <- function(workbench_url, auth_token = "", user_name =
 list_ecosounds_recordings <- function(workbench_url,
                                       auth_token,
                                       project_id,
+                                      recorder_id,
+                                      recorder_name,
                                       manifest,
                                       start_time) {
   page <- 1L
@@ -257,7 +358,16 @@ list_ecosounds_recordings <- function(workbench_url,
     "Content-Type: application/json",
     "Accept: application/json"
   )
-  filter_json <- jsonlite::toJSON(ecosounds_filter_object(project_id), auto_unbox = TRUE)
+  recorder_id <- normalise_optional_integer(recorder_id, "ecosounds_recorder_id")
+  recorder_name <- normalise_optional_text(recorder_name)
+  filter_json <- jsonlite::toJSON(
+    ecosounds_filter_object(
+      project_id = project_id,
+      recorder_id = recorder_id,
+      recorder_name = recorder_name
+    ),
+    auto_unbox = TRUE
+  )
 
   while (page <= max_page) {
     page_response <- run_curl_request(
@@ -282,8 +392,10 @@ list_ecosounds_recordings <- function(workbench_url,
 
     recordings_found <- sum(vapply(records, nrow, integer(1)))
     detail_text <- sprintf(
-      "listing EcoSounds project %s | page=%d/%s | recordings_found_so_far=%d",
+      "listing EcoSounds project %s%s%s | page=%d/%s | recordings_found_so_far=%d",
       as.integer(project_id),
+      if (!is.na(recorder_id)) sprintf(" | recorder_id=%s", recorder_id) else "",
+      if (nzchar(recorder_name)) sprintf(" | recorder_name=%s", recorder_name) else "",
       page,
       max_page,
       recordings_found
@@ -1612,8 +1724,15 @@ if (identical(source_mode, "archive")) {
     workbench_url = ecosounds_workbench_url,
     auth_token = ecosounds_token,
     project_id = ecosounds_project_id,
+    recorder_id = ecosounds_recorder_id,
+    recorder_name = ecosounds_recorder_name,
     manifest = manifest,
     start_time = start_time
+  )
+  recordings <- filter_ecosounds_recordings(
+    recordings = recordings,
+    recorder_id = ecosounds_recorder_id,
+    recorder_name = ecosounds_recorder_name
   )
 
   if (nrow(recordings) == 0) {
@@ -1622,7 +1741,14 @@ if (identical(source_mode, "archive")) {
 
   recordings <- recordings[order(recordings$recorded_date, recordings$site_id, recordings$canonical_file_name), , drop = FALSE]
   total_files <- nrow(recordings)
-  emit_console(sprintf("EcoSounds listing complete. Recordings found: %d", total_files))
+  recorder_filter_text <- if (!is.na(normalise_optional_integer(ecosounds_recorder_id, "ecosounds_recorder_id"))) {
+    sprintf(" | recorder_id=%s", normalise_optional_integer(ecosounds_recorder_id, "ecosounds_recorder_id"))
+  } else if (nzchar(normalise_optional_text(ecosounds_recorder_name))) {
+    sprintf(" | recorder_name=%s", normalise_optional_text(ecosounds_recorder_name))
+  } else {
+    ""
+  }
+  emit_console(sprintf("EcoSounds listing complete. Recordings found: %d%s", total_files, recorder_filter_text))
 
   for (recording_index in seq_len(total_files)) {
     recording <- recordings[recording_index, , drop = FALSE]

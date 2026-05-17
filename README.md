@@ -67,8 +67,12 @@ The script now supports two source modes selected near the top of the file:
 2. `source_mode <- "ecosounds"`
     - authenticates against the EcoSounds / Acoustic Workbench API
     - lists only the recordings accessible in the chosen project and matching the selected recorder/site filter
+    - when a site ID is set, uses the site-specific EcoSounds filter endpoint and a larger page size to obtain the file list faster
     - can optionally restrict processing to a single recorder/site in the user-defined settings
     - downloads each original recording file into a temporary local workspace one file at a time
+    - if original-file download is not permitted for your account, falls back to chunked `media.wav` downloads and concatenates them locally
+    - if EcoSounds denies direct access to the original file (`403`), falls back to the standard `media.wav` route for that recording
+    - can also fall back to the EcoSounds-generated PowerShell downloader script for single-recording downloads
     - processes `.wav` recordings directly and converts other source formats to `.wav` when needed
     - deletes the downloaded local audio immediately after that one file is analysed, before downloading the next file
 
@@ -164,6 +168,10 @@ Edit:
 - `ecosounds_project_id`
 - `ecosounds_recorder_id`
 - `ecosounds_recorder_name`
+- `ecosounds_download_method`
+- `ecosounds_powershell_script`
+- `ecosounds_refresh_powershell_script`
+- `ecosounds_listing_page_size`
 - `ecosounds_auth_token`
 - `ecosounds_user_name`
 - `ecosounds_password`
@@ -191,6 +199,13 @@ To process only one EcoSounds recorder at a time, set one of these near the top 
 - `ecosounds_recorder_name <- "GEL_A"` for an exact recorder/site name match when you know the API site name matches that label
 
 The EcoSounds listing request itself is restricted to that recorder/site before files are queued for download. Leave both empty if you want the whole project. Do not set both at once.
+
+The default EcoSounds settings now also include:
+
+- `ecosounds_download_method <- "api_then_powershell"` to try the direct API first and then fall back to the EcoSounds-generated PowerShell downloader
+- `ecosounds_powershell_script <- "/Users/brad0317/Downloads/download_audio_files.ps1"` as an optional local script path to reuse when refresh is disabled
+- `ecosounds_refresh_powershell_script <- TRUE` to regenerate the downloader script from EcoSounds for the current authenticated session before PowerShell fallback downloads
+- `ecosounds_listing_page_size <- 500L` to reduce the number of listing pages needed for large sites
 
 ### `scripts/analyse_birdnet_output.R`
 

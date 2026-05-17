@@ -9,6 +9,10 @@ ecosounds_project_id <- 1281L
 # GEL_B is site 7239; GEL_C is site 7240; GEL_D is site 7241; GEL_E is site 7242
 ecosounds_recorder_id <- 7238L  
 ecosounds_recorder_name <- ""  # exact EcoSounds site/recorder name; use this instead of ecosounds_recorder_id if preferred
+ecosounds_download_method <- "api_then_powershell"  # "api", "powershell", or "api_then_powershell"
+ecosounds_powershell_script <- "/Users/brad0317/Downloads/download_audio_files.ps1"
+ecosounds_refresh_powershell_script <- TRUE
+ecosounds_listing_page_size <- 500L
 ecosounds_auth_token <- trimws(Sys.getenv("ECOSOUNDS_AUTH_TOKEN", unset = ""))
 ecosounds_user_name <- trimws(Sys.getenv("ECOSOUNDS_USERNAME", unset = ""))
 ecosounds_password <- Sys.getenv("ECOSOUNDS_PASSWORD", unset = "")
@@ -140,20 +144,80 @@ safe_file_component <- function(text_value) {
   text_value
 }
 
+normalise_recorder_label <- function(label_text, fallback = "unknown") {
+  candidate <- trimws(as.character(label_text[[1]]))
+
+  if (!nzchar(candidate) || is.na(candidate)) {
+    return(fallback)
+  }
+
+  candidate <- toupper(candidate)
+  candidate <- gsub("[-[:space:]]+", "_", candidate)
+  candidate <- gsub("[^A-Z0-9_]", "", candidate)
+
+  if (!nzchar(candidate)) {
+    fallback
+  } else {
+    candidate
+  }
+}
+
 canonical_recording_key <- function(path_text) {
+  path_text <- normalizePath(as.character(path_text), winslash = "/", mustWork = FALSE)
   candidate <- basename(as.character(path_text))
   candidate <- sub("_birdnet_species_summary\\.csv$", "", candidate)
   candidate <- sub("_birdnet_predictions\\.csv$", "", candidate)
   candidate <- sub("\\.(wav|flac|mp3|aif|aiff|ogg|m4a|mp4)$", "", candidate, ignore.case = TRUE)
   candidate <- sub("^recording_[0-9]+_", "", candidate)
+
+  recorder_candidates <- regmatches(
+    path_text,
+    gregexpr("GEL[-_ ][A-Z]+", path_text, perl = TRUE)
+  )[[1]]
+  recorder_candidates <- recorder_candidates[!is.na(recorder_candidates) & nzchar(recorder_candidates)]
+  recorder_label <- if (length(recorder_candidates) > 0) {
+    normalise_recorder_label(recorder_candidates[[1]])
+  } else {
+    ""
+  }
+
+  timestamp_text <- regmatches(candidate, regexpr("[0-9]{8}T[0-9]{6}[+-][0-9]{4}", candidate))
+  timestamp_text <- if (length(timestamp_text) == 1 && !is.na(timestamp_text) && nzchar(timestamp_text)) timestamp_text else ""
+
+  coordinate_parts <- regmatches(
+    candidate,
+    regexec("(-?[0-9]{1,2}\\.[0-9]+)([+-][0-9]{1,3}\\.[0-9]+)", candidate, perl = TRUE)
+  )[[1]]
+  coordinate_key <- if (length(coordinate_parts) == 3) {
+    paste0(coordinate_parts[[2]], coordinate_parts[[3]])
+  } else {
+    ""
+  }
+
+  if (nzchar(timestamp_text) && nzchar(recorder_label)) {
+    return(sprintf("%s/%s", recorder_label, timestamp_text))
+  }
+
+  if (nzchar(timestamp_text) && nzchar(coordinate_key)) {
+    return(sprintf("%s/%s", timestamp_text, coordinate_key))
+  }
+
+  if (nzchar(timestamp_text)) {
+    return(timestamp_text)
+  }
+
   candidate
 }
 
 ecosounds_archive_member <- function(recording) {
   canonical_name <- basename(as.character(recording[["canonical_file_name"]]))
+  recorder_label <- normalise_recorder_label(
+    recording[["sites.name"]],
+    fallback = sprintf("site_%s", as.integer(recording[["site_id"]]))
+  )
   file.path(
-    sprintf("site_%s", as.integer(recording[["site_id"]])),
-    sprintf("recording_%s_%s", as.integer(recording[["id"]]), canonical_name)
+    recorder_label,
+    canonical_name
   )
 }
 
@@ -185,18 +249,43 @@ normalise_optional_text <- function(value) {
   trimws(as.character(value[[1]]))
 }
 
+normalise_optional_path <- function(value) {
+  path_text <- normalise_optional_text(value)
+
+  if (!nzchar(path_text)) {
+    return("")
+  }
+
+  path.expand(path_text)
+}
+
+normalise_positive_integer <- function(value, setting_name) {
+  integer_value <- suppressWarnings(as.integer(value[[1]]))
+
+  if (length(integer_value) == 0 || is.na(integer_value) || integer_value < 1L) {
+    stop(sprintf("%s must be set to a positive whole number.", setting_name))
+  }
+
+  integer_value
+}
+
 ecosounds_filter_object <- function(project_id,
                                     recorder_id = NA_integer_,
-                                    recorder_name = "") {
+                                    recorder_name = "",
+                                    page_size = 500L,
+                                    recording_id = NA_integer_) {
   recorder_id <- normalise_optional_integer(recorder_id, "ecosounds_recorder_id")
   recorder_name <- normalise_optional_text(recorder_name)
+  page_size <- normalise_positive_integer(page_size, "ecosounds_listing_page_size")
+  recording_id <- normalise_optional_integer(recording_id, "recording_id")
 
   if (!is.na(recorder_id) && nzchar(recorder_name)) {
     stop("Set only one of ecosounds_recorder_id or ecosounds_recorder_name.")
   }
 
   and_filters <- list(
-    "projects.id" = list(eq = as.integer(project_id))
+    "projects.id" = list(eq = as.integer(project_id)),
+    "status" = list(eq = "ready")
   )
 
   if (!is.na(recorder_id)) {
@@ -207,11 +296,17 @@ ecosounds_filter_object <- function(project_id,
     and_filters[["sites.name"]] <- list(eq = recorder_name)
   }
 
+  if (!is.na(recording_id)) {
+    and_filters[["id"]] <- list(eq = recording_id)
+  }
+
   list(
     filter = list(and = and_filters),
     projection = list(
       only = c("id", "recorded_date", "sites.name", "site_id", "canonical_file_name")
-    )
+    ),
+    sorting = list(order_by = "recorded_date", direction = "desc"),
+    paging = list(items = page_size)
   )
 }
 
@@ -347,6 +442,7 @@ list_ecosounds_recordings <- function(workbench_url,
                                       project_id,
                                       recorder_id,
                                       recorder_name,
+                                      page_size,
                                       manifest,
                                       start_time) {
   page <- 1L
@@ -360,18 +456,30 @@ list_ecosounds_recordings <- function(workbench_url,
   )
   recorder_id <- normalise_optional_integer(recorder_id, "ecosounds_recorder_id")
   recorder_name <- normalise_optional_text(recorder_name)
+  page_size <- normalise_positive_integer(page_size, "ecosounds_listing_page_size")
+  list_endpoint <- if (!is.na(recorder_id)) {
+    sprintf(
+      "%s/projects/%s/sites/%s/audio_recordings/filter",
+      base_url,
+      as.integer(project_id),
+      recorder_id
+    )
+  } else {
+    sprintf("%s/audio_recordings/filter", base_url)
+  }
   filter_json <- jsonlite::toJSON(
     ecosounds_filter_object(
       project_id = project_id,
       recorder_id = recorder_id,
-      recorder_name = recorder_name
+      recorder_name = recorder_name,
+      page_size = page_size
     ),
     auto_unbox = TRUE
   )
 
   while (page <= max_page) {
     page_response <- run_curl_request(
-      url = sprintf("%s/audio_recordings/filter?page=%d", base_url, page),
+      url = sprintf("%s?page=%d", list_endpoint, page),
       method = "POST",
       headers = json_headers,
       body_json = filter_json
@@ -428,30 +536,357 @@ list_ecosounds_recordings <- function(workbench_url,
   do.call(rbind, non_empty_records)
 }
 
-download_ecosounds_recording <- function(recording,
-                                         workbench_url,
-                                         auth_token,
-                                         download_root) {
+download_ecosounds_downloader_script <- function(workbench_url,
+                                                 auth_token,
+                                                 filter_json,
+                                                 output_path = "") {
+  script_path <- if (nzchar(normalise_optional_path(output_path))) {
+    normalise_optional_path(output_path)
+  } else {
+    tempfile(pattern = "ecosounds-downloader-", fileext = ".ps1")
+  }
+
+  dir.create(dirname(script_path), recursive = TRUE, showWarnings = FALSE)
+  script_response <- run_curl_request(
+    url = sprintf("%s/audio_recordings/downloader", sub("/$", "", workbench_url)),
+    method = "POST",
+    headers = c(
+      sprintf("Authorization: Token token=\"%s\"", auth_token),
+      "Content-Type: application/json",
+      "Accept: text/plain"
+    ),
+    body_json = filter_json,
+    output_file = script_path
+  )
+
+  if (!identical(script_response$status_code, 200L)) {
+    if (file.exists(script_path)) {
+      unlink(script_path, force = TRUE)
+    }
+    stop(sprintf("Failed to generate EcoSounds downloader script (HTTP %s).", script_response$status_code))
+  }
+
+  Sys.chmod(script_path, mode = "700")
+  script_path
+}
+
+fetch_ecosounds_recording_details <- function(workbench_url, auth_token, recording_id) {
+  details_response <- run_curl_request(
+    url = sprintf("%s/audio_recordings/%s", sub("/$", "", workbench_url), as.integer(recording_id)),
+    method = "GET",
+    headers = c(
+      sprintf("Authorization: Token token=\"%s\"", auth_token),
+      "Accept: application/json"
+    )
+  )
+
+  if (!identical(details_response$status_code, 200L)) {
+    stop(sprintf("Failed to fetch EcoSounds recording metadata for %s (HTTP %s).", recording_id, details_response$status_code))
+  }
+
+  jsonlite::fromJSON(details_response$response_file)
+}
+
+format_ecosounds_offset <- function(value) {
+  formatted <- formatC(as.numeric(value), format = "f", digits = 4)
+  formatted <- sub("0+$", "", formatted)
+  sub("\\.$", "", formatted)
+}
+
+download_ecosounds_recording_via_media_segments <- function(recording,
+                                                            workbench_url,
+                                                            auth_token,
+                                                            download_root,
+                                                            recording_details,
+                                                            segment_seconds = 300) {
+  duration_seconds <- suppressWarnings(as.numeric(recording_details$data$duration_seconds[[1]]))
+
+  if (is.na(duration_seconds) || duration_seconds <= 0) {
+    stop(sprintf("EcoSounds recording %s does not have a valid duration for segmented media download.", recording[["id"]]))
+  }
+
   relative_item <- ecosounds_archive_member(recording)
   local_path <- file.path(download_root, relative_item)
   dir.create(dirname(local_path), recursive = TRUE, showWarnings = FALSE)
+  segment_dir <- file.path(download_root, "media_segments")
+  dir.create(segment_dir, recursive = TRUE, showWarnings = FALSE)
 
-  download_response <- run_curl_request(
-    url = sprintf("%s/audio_recordings/%s/original", sub("/$", "", workbench_url), recording[["id"]]),
-    method = "GET",
-    headers = sprintf("Authorization: Token token=\"%s\"", auth_token),
-    output_file = local_path
+  segment_starts <- seq(0, duration_seconds, by = segment_seconds)
+  if (tail(segment_starts, 1) >= duration_seconds) {
+    segment_starts <- head(segment_starts, -1)
+  }
+  if (length(segment_starts) == 0) {
+    segment_starts <- 0
+  }
+
+  is_valid_wav_file <- function(path_text) {
+    if (!file.exists(path_text) || file.info(path_text)$size <= 1024) {
+      return(FALSE)
+    }
+
+    connection <- file(path_text, open = "rb")
+    on.exit(close(connection), add = TRUE)
+    header_bytes <- readBin(connection, what = "raw", n = 12)
+    length(header_bytes) >= 12 &&
+      identical(rawToChar(header_bytes[1:4]), "RIFF") &&
+      identical(rawToChar(header_bytes[9:12]), "WAVE")
+  }
+
+  segment_paths <- vapply(seq_along(segment_starts), function(index) {
+    start_offset <- segment_starts[[index]]
+    end_offset <- min(start_offset + segment_seconds, duration_seconds)
+    segment_path <- file.path(segment_dir, sprintf("segment_%04d.wav", index))
+    request_variants <- list(
+      c(start_offset, end_offset, 0),
+      c(start_offset, if (end_offset < duration_seconds) max(start_offset + 0.1, end_offset - 0.1) else end_offset, 0),
+      c(if (start_offset > 0) start_offset + 0.1 else start_offset, if (end_offset < duration_seconds) max(start_offset + 0.1, end_offset - 0.1) else end_offset, 0),
+      c(start_offset, end_offset, 1)
+    )
+    variant_keys <- vapply(request_variants, function(bounds) sprintf("%.4f|%.4f|%s", bounds[[1]], bounds[[2]], bounds[[3]]), character(1))
+    request_variants <- request_variants[!duplicated(variant_keys)]
+    segment_ok <- FALSE
+    last_status_code <- NA_integer_
+
+    for (bounds in request_variants) {
+      for (attempt_index in seq_len(3L)) {
+        if (file.exists(segment_path)) {
+          unlink(segment_path, force = TRUE)
+        }
+        segment_url <- sprintf(
+          "%s/audio_recordings/%s/media.wav?start_offset=%s&end_offset=%s&channel=%s",
+          sub("/$", "", workbench_url),
+          as.integer(recording[["id"]]),
+          format_ecosounds_offset(bounds[[1]]),
+          format_ecosounds_offset(bounds[[2]]),
+          as.integer(bounds[[3]])
+        )
+        segment_response <- run_curl_request(
+          url = segment_url,
+          method = "GET",
+          headers = sprintf("Authorization: Token token=\"%s\"", auth_token),
+          output_file = segment_path
+        )
+        last_status_code <- segment_response$status_code
+
+        if (identical(last_status_code, 200L) && is_valid_wav_file(segment_path)) {
+          segment_ok <- TRUE
+          break
+        }
+
+        if (file.exists(segment_path)) {
+          unlink(segment_path, force = TRUE)
+        }
+
+        if (attempt_index < 3L) {
+          Sys.sleep(1)
+        }
+      }
+
+      if (segment_ok) {
+        break
+      }
+    }
+
+    if (!segment_ok) {
+      if (file.exists(segment_path)) {
+        unlink(segment_path, force = TRUE)
+      }
+      stop(
+        sprintf(
+          "Segmented EcoSounds media download failed for recording %s at %.3f-%.3f seconds (HTTP %s).",
+          recording[["id"]],
+          start_offset,
+          end_offset,
+          last_status_code
+        )
+      )
+    }
+
+    segment_path
+  }, character(1))
+
+  concat_manifest <- file.path(segment_dir, "segments.txt")
+  writeLines(
+    sprintf("file '%s'", gsub("'", "'\\''", normalizePath(segment_paths, winslash = "/", mustWork = TRUE), fixed = TRUE)),
+    concat_manifest
   )
 
-  if (!identical(download_response$status_code, 200L)) {
+  ffmpeg_status <- system2(
+    "ffmpeg",
+    args = c("-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", concat_manifest, "-c", "copy", local_path)
+  )
+
+  if (!identical(ffmpeg_status, 0L) || !file.exists(local_path) || file.info(local_path)$size <= 0) {
+    stop(sprintf("Failed to concatenate segmented EcoSounds media download for recording %s.", recording[["id"]]))
+  }
+
+  local_path
+}
+
+download_ecosounds_recording <- function(recording,
+                                         workbench_url,
+                                         auth_token,
+                                         download_root,
+                                         download_method = "api_then_powershell",
+                                         powershell_script = "",
+                                         project_id = NA_integer_,
+                                         refresh_powershell_script = TRUE) {
+  relative_item <- ecosounds_archive_member(recording)
+  local_path <- file.path(download_root, relative_item)
+  dir.create(dirname(local_path), recursive = TRUE, showWarnings = FALSE)
+  auth_header <- sprintf("Authorization: Token token=\"%s\"", auth_token)
+  base_url <- sub("/$", "", workbench_url)
+  requested_original_url <- sprintf("%s/audio_recordings/%s/original", base_url, recording[["id"]])
+  original_status_code <- NA_integer_
+  fallback_status_code <- NA_integer_
+  recording_details <- fetch_ecosounds_recording_details(workbench_url, auth_token, recording[["id"]])
+  can_download_original <- isTRUE(recording_details$meta$capabilities$original_download$can[[1]])
+  powershell_script <- normalise_optional_path(powershell_script)
+  project_id <- normalise_optional_integer(project_id, "ecosounds_project_id")
+  refresh_powershell_script <- isTRUE(refresh_powershell_script)
+
+  run_api_download <- function() {
+    if (!isTRUE(can_download_original)) {
+      local_path <<- download_ecosounds_recording_via_media_segments(
+        recording = recording,
+        workbench_url = workbench_url,
+        auth_token = auth_token,
+        download_root = download_root,
+        recording_details = recording_details
+      )
+      return(TRUE)
+    }
+
+    download_response <- run_curl_request(
+      url = requested_original_url,
+      method = "GET",
+      headers = auth_header,
+      output_file = local_path
+    )
+    original_status_code <<- download_response$status_code
+
+    if (identical(original_status_code, 403L)) {
+      local_path <<- download_ecosounds_recording_via_media_segments(
+        recording = recording,
+        workbench_url = workbench_url,
+        auth_token = auth_token,
+        download_root = download_root,
+        recording_details = recording_details
+      )
+      fallback_status_code <<- 200L
+      return(TRUE)
+    }
+
+    if (!identical(download_response$status_code, 200L) && file.exists(local_path)) {
+      unlink(local_path, force = TRUE)
+    }
+
+    identical(download_response$status_code, 200L)
+  }
+
+  run_powershell_download <- function() {
+    powershell_binary <- Sys.which("pwsh")
+
+    if (!nzchar(powershell_binary)) {
+      stop("PowerShell download method requested, but pwsh is not available on PATH.")
+    }
+
+    powershell_target <- file.path(download_root, "powershell_download")
+    dir.create(powershell_target, recursive = TRUE, showWarnings = FALSE)
+    filter_json <- jsonlite::toJSON(
+      ecosounds_filter_object(
+        project_id = project_id,
+        recorder_id = normalise_optional_integer(recording[["site_id"]], "recording_site_id"),
+        recorder_name = "",
+        page_size = 1L,
+        recording_id = normalise_optional_integer(recording[["id"]], "recording_id")
+      ),
+      auto_unbox = TRUE
+    )
+    script_path <- if (refresh_powershell_script || !nzchar(powershell_script) || !file.exists(powershell_script)) {
+      download_ecosounds_downloader_script(
+        workbench_url = workbench_url,
+        auth_token = auth_token,
+        filter_json = filter_json,
+        output_path = if (refresh_powershell_script) "" else powershell_script
+      )
+    } else {
+      Sys.chmod(powershell_script, mode = "700")
+      powershell_script
+    }
+    powershell_args <- c(
+      "-NoProfile",
+      "-File",
+      script_path,
+      "-target",
+      powershell_target,
+      "-auth_token",
+      auth_token,
+      "-filter",
+      filter_json,
+      "-workbench_url",
+      workbench_url,
+      "-clobber"
+    )
+    powershell_result <- processx::run(
+      command = powershell_binary,
+      args = powershell_args,
+      error_on_status = FALSE
+    )
+
+    if (!identical(powershell_result$status, 0L)) {
+      stop(
+        paste(
+          c(
+            sprintf("PowerShell EcoSounds download failed for recording %s.", recording[["id"]]),
+            trimws(powershell_result$stdout),
+            trimws(powershell_result$stderr)
+          ),
+          collapse = "\n"
+        )
+      )
+    }
+
+    target_name <- basename(as.character(recording[["canonical_file_name"]]))
+    matching_downloads <- list.files(
+      powershell_target,
+      recursive = TRUE,
+      full.names = TRUE
+    )
+    matching_downloads <- matching_downloads[basename(matching_downloads) == target_name]
+
+    if (length(matching_downloads) == 0) {
+      stop(sprintf("PowerShell EcoSounds download reported success but did not produce %s.", target_name))
+    }
+
+    local_path <<- matching_downloads[[1]]
+    TRUE
+  }
+
+  download_success <- switch(
+    download_method,
+    api = run_api_download(),
+    powershell = run_powershell_download(),
+    api_then_powershell = {
+      api_success <- run_api_download()
+      if (isTRUE(api_success)) TRUE else run_powershell_download()
+    },
+    stop("ecosounds_download_method must be one of 'api', 'powershell', or 'api_then_powershell'.")
+  )
+
+  if (!isTRUE(download_success) || !file.exists(local_path)) {
     if (file.exists(local_path)) {
       unlink(local_path, force = TRUE)
     }
     stop(
       sprintf(
-        "EcoSounds download failed for recording %s with HTTP status %s.",
+        paste(
+          "EcoSounds download failed for recording %s.",
+          "Original-file request returned HTTP %s%s."
+        ),
         recording[["id"]],
-        download_response$status_code
+        if (is.na(original_status_code)) "n/a" else original_status_code,
+        if (!is.na(fallback_status_code)) sprintf(" and fallback media.wav request returned HTTP %s", fallback_status_code) else ""
       )
     )
   }
@@ -1726,6 +2161,7 @@ if (identical(source_mode, "archive")) {
     project_id = ecosounds_project_id,
     recorder_id = ecosounds_recorder_id,
     recorder_name = ecosounds_recorder_name,
+    page_size = ecosounds_listing_page_size,
     manifest = manifest,
     start_time = start_time
   )
@@ -1796,7 +2232,11 @@ if (identical(source_mode, "archive")) {
           recording = recording,
           workbench_url = ecosounds_workbench_url,
           auth_token = ecosounds_token,
-          download_root = recording_workspace
+          download_root = recording_workspace,
+          download_method = ecosounds_download_method,
+          powershell_script = ecosounds_powershell_script,
+          project_id = ecosounds_project_id,
+          refresh_powershell_script = ecosounds_refresh_powershell_script
         )
 
         updated_manifest <- process_local_audio_item(

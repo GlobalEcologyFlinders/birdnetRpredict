@@ -338,19 +338,71 @@ build_species_label_plotmath <- function(common_name, scientific_name) {
 
 extract_recorder_id <- function(path_text) {
   path_parts <- strsplit(normalizePath(path_text, winslash = "/", mustWork = FALSE), "/", fixed = TRUE)[[1]]
-  recorder_hits <- unique(path_parts[grepl("^GEL_[A-Z]+$", path_parts)])
+  normalise_recorder_id <- function(text_value) {
+    candidate <- toupper(as.character(text_value))
+    candidate <- gsub("[-[:space:]]+", "_", candidate)
+    candidate <- gsub("[^A-Z0-9_]", "", candidate)
+    candidate
+  }
+  recorder_hits <- unique(normalise_recorder_id(path_parts[grepl("^GEL[-_ ][A-Z]+$", path_parts)]))
 
   if (length(recorder_hits) > 0) {
     return(recorder_hits[1])
   }
 
-  file_hit <- regmatches(basename(path_text), regexpr("GEL_[A-Z]+", basename(path_text)))
+  file_hit <- regmatches(basename(path_text), regexpr("GEL[-_ ][A-Z]+", basename(path_text)))
 
   if (length(file_hit) == 1 && !is.na(file_hit) && nzchar(file_hit)) {
-    return(file_hit)
+    return(normalise_recorder_id(file_hit))
   }
 
   "unknown"
+}
+
+canonical_recording_key <- function(path_text) {
+  path_text <- normalizePath(as.character(path_text), winslash = "/", mustWork = FALSE)
+  candidate <- basename(as.character(path_text))
+  candidate <- sub("_birdnet_species_summary\\.csv$", "", candidate)
+  candidate <- sub("_birdnet_predictions\\.csv$", "", candidate)
+  candidate <- sub("\\.(wav|flac|mp3|aif|aiff|ogg|m4a|mp4)$", "", candidate, ignore.case = TRUE)
+  candidate <- sub("^recording_[0-9]+_", "", candidate)
+
+  normalise_recorder_id <- function(text_value) {
+    candidate <- toupper(as.character(text_value))
+    candidate <- gsub("[-[:space:]]+", "_", candidate)
+    candidate <- gsub("[^A-Z0-9_]", "", candidate)
+    candidate
+  }
+
+  recorder_candidates <- regmatches(
+    path_text,
+    gregexpr("GEL[-_ ][A-Z]+", path_text, perl = TRUE)
+  )[[1]]
+  recorder_candidates <- recorder_candidates[!is.na(recorder_candidates) & nzchar(recorder_candidates)]
+  recorder_label <- if (length(recorder_candidates) > 0) normalise_recorder_id(recorder_candidates[[1]]) else ""
+
+  timestamp_text <- regmatches(candidate, regexpr("[0-9]{8}T[0-9]{6}[+-][0-9]{4}", candidate))
+  timestamp_text <- if (length(timestamp_text) == 1 && !is.na(timestamp_text) && nzchar(timestamp_text)) timestamp_text else ""
+
+  coordinate_parts <- regmatches(
+    candidate,
+    regexec("(-?[0-9]{1,2}\\.[0-9]+)([+-][0-9]{1,3}\\.[0-9]+)", candidate, perl = TRUE)
+  )[[1]]
+  coordinate_key <- if (length(coordinate_parts) == 3) paste0(coordinate_parts[[2]], coordinate_parts[[3]]) else ""
+
+  if (nzchar(timestamp_text) && nzchar(recorder_label)) {
+    return(sprintf("%s/%s", recorder_label, timestamp_text))
+  }
+
+  if (nzchar(timestamp_text) && nzchar(coordinate_key)) {
+    return(sprintf("%s/%s", timestamp_text, coordinate_key))
+  }
+
+  if (nzchar(timestamp_text)) {
+    return(timestamp_text)
+  }
+
+  candidate
 }
 
 na_posixct <- function(timezone) {
@@ -2017,6 +2069,17 @@ summary_csv_files <- list.files(
   full.names = TRUE
 )
 summary_csv_files <- summary_csv_files[!grepl("/analysis/", summary_csv_files)]
+if (length(summary_csv_files) > 1) {
+  summary_file_index <- data.frame(
+    summary_csv = summary_csv_files,
+    recording_key = vapply(summary_csv_files, canonical_recording_key, character(1)),
+    modified_time = as.numeric(file.info(summary_csv_files)$mtime),
+    stringsAsFactors = FALSE
+  )
+  summary_file_index <- summary_file_index[order(summary_file_index$recording_key, -summary_file_index$modified_time), , drop = FALSE]
+  summary_file_index <- summary_file_index[!duplicated(summary_file_index$recording_key), , drop = FALSE]
+  summary_csv_files <- summary_file_index$summary_csv
+}
 summary_file_metadata <- build_summary_file_metadata(summary_csv_files, timezone = analysis_timezone)
 
 if (length(summary_csv_files) == 0) {

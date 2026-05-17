@@ -30,6 +30,10 @@ birdnetRpredict/
 │   ├── analyse_birdnet_output.R
 │   ├── birdnet_helpers.R
 │   ├── birdnetID.R
+│   ├── downloading_user_options.R
+│   ├── process_download_common.R
+│   ├── process_download_pipeline.R
+│   ├── process_ecosounds.R
 │   └── process_tar_archive.R
 └── www
 ```
@@ -53,30 +57,39 @@ birdnetRpredict/
 
 ### Source-processing workflow
 
-`scripts/process_tar_archive.R`:
+The source-processing pipeline is now split across four scripts:
 
-The script now supports two source modes selected near the top of the file:
+1. `scripts/downloading_user_options.R`
+   - holds the user-editable download settings in one place
+   - includes `source_mode <- "archive"` or `source_mode <- "ecosounds"`
+   - includes the archive path, EcoSounds credentials/settings, and other user-adjustable processing settings
 
-1. `source_mode <- "archive"`
+2. `scripts/process_download_pipeline.R`
+   - sources `downloading_user_options.R`
+   - dispatches automatically to the correct source-specific entrypoint based on `source_mode`
+
+3. `scripts/process_tar_archive.R`
+   - archive-only entrypoint
    - opens a source `.tar.zst`
    - streams the archive sequentially instead of doing a full pre-scan
    - starts processing as soon as the next `.flac` is encountered
    - extracts a single `.flac` while preserving the internal archive path
    - converts that `.flac` to `.wav` with `ffmpeg`
 
-2. `source_mode <- "ecosounds"`
-    - authenticates against the EcoSounds / Acoustic Workbench API
-    - lists only the recordings accessible in the chosen project and matching the selected recorder/site filter
-    - when a site ID is set, uses the site-specific EcoSounds filter endpoint and a larger page size to obtain the file list faster
-    - can optionally restrict processing to a single recorder/site in the user-defined settings
-    - downloads each original recording file into a temporary local workspace one file at a time
-    - if original-file download is not permitted for your account, falls back to chunked `media.wav` downloads and concatenates them locally
-    - if EcoSounds denies direct access to the original file (`403`), falls back to the standard `media.wav` route for that recording
-    - can also fall back to the EcoSounds-generated PowerShell downloader script for single-recording downloads
-    - processes `.wav` recordings directly and converts other source formats to `.wav` when needed
-    - deletes the downloaded local audio immediately after that one file is analysed, before downloading the next file
+4. `scripts/process_ecosounds.R`
+   - EcoSounds-only entrypoint
+   - authenticates against the EcoSounds / Acoustic Workbench API
+   - lists only the recordings accessible in the chosen project and matching the selected recorder/site filter
+   - when a site ID is set, uses the site-specific EcoSounds filter endpoint and a larger page size to obtain the file list faster
+   - can optionally restrict processing to a single recorder/site in the user-defined settings
+   - downloads each original recording file into a temporary local workspace one file at a time
+   - if original-file download is not permitted for your account, falls back to chunked `media.wav` downloads and concatenates them locally
+   - if EcoSounds denies direct access to the original file (`403`), falls back to the standard `media.wav` route for that recording
+   - can also fall back to the EcoSounds-generated PowerShell downloader script for single-recording downloads
+   - processes `.wav` recordings directly and converts other source formats to `.wav` when needed
+   - deletes the downloaded local audio immediately after that one file is analysed, before downloading the next file
 
-In both modes the script then:
+The shared source-processing logic then:
 
 1. runs the same BirdNET summary workflow used by the single-file script
 2. writes per-file CSV outputs
@@ -158,7 +171,7 @@ Edit:
 - `prediction_min_confidence`
 - `summary_confidence_threshold`
 
-### `scripts/process_tar_archive.R`
+### `scripts/downloading_user_options.R`
 
 Edit:
 
@@ -176,14 +189,16 @@ Edit:
 - `ecosounds_user_name`
 - `ecosounds_password`
 - `species_csv`
+- `pipeline_timezone`
 - `fallback_latitude`
 - `fallback_longitude`
 - `prediction_min_confidence`
 - `summary_confidence_threshold`
+- `use_arrow`
 - `stage_heartbeat_seconds`
 - `stage_timeout_seconds`
 
-These control whether the script processes a local archive or an authenticated EcoSounds project, which single EcoSounds recorder/site is included (if any), which species filter is used, and how strict the prediction summaries are.
+These control which source pipeline is used, whether the run processes a local archive or an authenticated EcoSounds project, which single EcoSounds recorder/site is included (if any), which species filter is used, how strict the prediction summaries are, and how often the source-processing pipeline emits heartbeat updates while waiting on extraction/download or BirdNET subprocess stages.
 
 For EcoSounds access, prefer supplying credentials through environment variables rather than storing secrets in the script:
 
@@ -193,7 +208,7 @@ For EcoSounds access, prefer supplying credentials through environment variables
 
 If `ECOSOUNDS_AUTH_TOKEN` is supplied, the script uses it directly. Otherwise it logs in with `ECOSOUNDS_USERNAME` + `ECOSOUNDS_PASSWORD` and then downloads recordings from the selected project.
 
-To process only one EcoSounds recorder at a time, set one of these near the top of `scripts/process_tar_archive.R`:
+To process only one EcoSounds recorder at a time, set one of these near the top of `scripts/downloading_user_options.R`:
 
 - `ecosounds_recorder_id <- 7238L` for the `GEL_A` EcoSounds site in project `1281`
 - `ecosounds_recorder_name <- "GEL_A"` for an exact recorder/site name match when you know the API site name matches that label
@@ -215,13 +230,14 @@ Edit the user-defined settings directly near the top of the script:
 - `output_root`
 - `analysis_timezone`
 - `bin_minutes`
+- `diversity_window_days`
 - `top_species_time_bin_minutes`
 - `rolling_mean_window_days`
 - `min_confidence`
 - `periodicity_max_lag_bins`
 - `show_plots_in_session`
 
-These control which existing summary CSVs are included, where the analysis outputs are written, the temporal bin size used by the plots, and the minimum confidence required for a detection to be counted.
+These control which existing summary CSVs are included, where the analysis outputs are written, the temporal bin size used by the plots, the diversity-analysis window length, and the minimum confidence required for a detection to be counted.
 
 ## How to run
 
@@ -234,7 +250,7 @@ Rscript scripts/birdnetID.R
 ### Source-processing pipeline
 
 ```bash
-Rscript scripts/process_tar_archive.R
+Rscript scripts/process_download_pipeline.R
 ```
 
 With `source_mode <- "ecosounds"`, make sure your EcoSounds credentials are available first, for example:
@@ -242,10 +258,19 @@ With `source_mode <- "ecosounds"`, make sure your EcoSounds credentials are avai
 ```bash
 export ECOSOUNDS_USERNAME="your_username"
 export ECOSOUNDS_PASSWORD="your_password"
-Rscript scripts/process_tar_archive.R
+Rscript scripts/process_download_pipeline.R
 ```
 
-Or set `ecosounds_auth_token`, `ecosounds_user_name`, and `ecosounds_password` directly in the user-defined settings block before running the script.
+Or set `ecosounds_auth_token`, `ecosounds_user_name`, and `ecosounds_password` directly in `scripts/downloading_user_options.R` before running the pipeline.
+
+If you want to force a specific source entrypoint directly, you can run:
+
+```bash
+Rscript scripts/process_tar_archive.R
+Rscript scripts/process_ecosounds.R
+```
+
+Those entrypoints still read `scripts/downloading_user_options.R`, but they now stop if `source_mode` does not match the script you ran.
 
 ### Post-processing analysis
 
@@ -364,10 +389,19 @@ The analysis workflow writes:
   month-by-species summaries calculated separately for each recorder
 
 - `birdnet_monthly_diversity_metrics.csv`  
-  monthly recorder-level diversity metrics calculated from detections-as-abundance, including Shannon index, Simpson index, and Hill numbers for <em>q</em> = 1 and <em>q</em> = 2
+  recorder-level diversity metrics calculated from detections-as-abundance across user-defined diversity windows, including Shannon index, Simpson index, and Hill numbers for <em>q</em> = 1 and <em>q</em> = 2
 
 - `birdnet_monthly_diversity_metrics_overall.csv`  
-  monthly diversity metrics after combining detections across all currently analysed recorders
+  diversity metrics after combining detections across all currently analysed recorders within each user-defined diversity window
+
+- `birdnet_monthly_diversity_metrics_daily_incidence.csv`  
+  recorder-level diversity metrics calculated from daily species incidence within each user-defined diversity window
+
+- `birdnet_monthly_diversity_metrics_daily_incidence_overall.csv`  
+  diversity metrics after combining daily species incidence across all currently analysed recorders within each user-defined diversity window
+
+- `birdnet_raw_species_richness_by_month.csv`  
+  raw calendar-month species richness calculated as the number of unique species detected in each month
 
 - `birdnet_identification_acf.csv`  
   detection-count autocorrelation values by temporal lag, retained for backward compatibility
@@ -405,6 +439,8 @@ The analysis workflow writes:
 - `birdnet_identifications_by_species.png`
 - `birdnet_identifications_by_species_by_month.png`
 - `birdnet_monthly_diversity_metrics.png`
+- `birdnet_monthly_diversity_metrics_daily_incidence.png`
+- `birdnet_raw_species_richness_by_month.png`
 - `birdnet_periodicity.png`  
   overall temporal-diagnostics figure combining all recorders currently present in the analysis, with ACF, PACF, and spectral-density panels for detections and unique species
 
@@ -424,7 +460,7 @@ The analysis workflow writes:
 In the species-frequency plots, the identification axis is shown on a log<sub>10</sub> scale, and common names are displayed in lowercase except where proper nouns remain capitalised. Latin names are italicised in the species-axis labels.
 The root-level analysis figures are the combined overall results across all recorders currently present in `out/`. Additional recorder-comparison figures are written as multi-panel plots, and recorder-specific figures are written into the `recorders/` subdirectory as each recorder becomes available.
 The detections-over-time plots now include two versions: a log<sub>10</sub>-scale plot with black bars and a red trailing running mean controlled by `rolling_mean_window_days`, and a separate linear-scale plot with black bars only and no running mean. The linear-scale versions include low-alpha background bands showing local morning twilight (pink), daylight (yellow), evening twilight (pink), and night (dark blue).
-Monthly diversity metrics treat the number of detections per species as the abundance proxy for Shannon, Simpson, and Hill-number calculations, and are produced as overall combined figures, recorder-specific figures, and recorder-comparison figures.
+The count-based diversity metrics treat the number of detections per species as the abundance proxy for Shannon, Simpson, and Hill-number calculations, and are produced across user-defined diversity windows set with `diversity_window_days`. A parallel daily-incidence diversity summary is also written, and raw species richness by calendar month is plotted separately.
 The top-species time-series plots default to 24-hour bins through `top_species_time_bin_minutes <- 24 × 60`, but that bin size can be changed directly in `scripts/analyse_birdnet_output.R`.
 In the recorder-comparison diversity figure, each recorder-by-metric panel now uses its own y-axis range so Shannon, Simpson, and Hill-number panels are scaled to their local maxima.
 The temporal periodicity figures now show both detections per time bin and unique species identified per time bin. Autocorrelation function (ACF) and partial autocorrelation function (PACF) panels include approximate type I error bands (<code>± 1.96/√<em>N</em></code>), spectral-density panels mark the strongest candidate periods, and the companion Ljung-Box CSV outputs provide a compact test summary at identified lags for easier interpretation of recurring temporal structure.
@@ -482,7 +518,7 @@ Interpretation in this workflow:
 
 ## Console progress during source-processing runs
 
-When `Rscript scripts/process_tar_archive.R` is running, the console reports:
+When `Rscript scripts/process_download_pipeline.R` is running, the console reports:
 
 - current file index and percent complete
 - current per-file stage percent
@@ -572,7 +608,7 @@ BirdNET model startup and inference can also take a long time, especially on the
 If the process is interrupted, rerun:
 
 ```bash
-Rscript scripts/process_tar_archive.R
+Rscript scripts/process_download_pipeline.R
 ```
 
 Files with existing summary outputs skipped automatically.
@@ -583,7 +619,7 @@ Files with existing summary outputs skipped automatically.
 - in EcoSounds mode, each downloaded recording is stored in a per-recording temporary workspace that is removed before the next download begins
 - helper functions live in `scripts/birdnet_helpers.R`
 - archive mode mirrors the archive subdirectory structure in the output folder when writing per-file CSV results
-- EcoSounds mode writes outputs under stable `site_<site_id>/recording_<recording_id>_...` paths so interrupted runs can resume cleanly and skip already processed recordings
+- EcoSounds mode writes outputs under stable recorder-based paths such as `GEL_A/<canonical_file_name>_...` so interrupted runs can resume cleanly and skip already processed recordings
 
 <br>
 <p><a href="https://www.flinders.edu.au"><img align="bottom-left" src="www/Flinders_University_Logo_Stacked_RGB_Master.jpg" alt="Flinders University" height="90" style="margin-top: 20px"></a> <a href="https://globalecologyflinders.com"><img align="bottom-left" src="www/GEL Logo Kaurna New Transp.png" alt="Global Ecology Laboratory" height="83" style="margin-top: 20px"></a> <a href="https://ciehf.au/"><img align="bottom-left" src="www/CIEHF_Logo_Email_Version.jpg" alt="CIEHF" height="72" style="margin-top: 20px"></a> &nbsp; &nbsp; <a href="http://ngarrindjeri.com.au/"><img align="bottom-left" src="www/NAClogo.png" alt="Ngarrindjeri Aboriginal Corporation" height="78" style="margin-top: 20px"></a></p>

@@ -1,8 +1,9 @@
 # user-defined settings ----------------------------------------------------
 analysis_timezone <- "Australia/Adelaide"
 bin_minutes <- 60
+diversity_window_days <- 14L
 top_species_time_bin_minutes <- 4 * 7 * 24 * 60
-rolling_mean_window_days <- 30
+rolling_mean_window_days <- 14
 min_confidence <- 0.1
 periodicity_max_lag_bins <- 48L
 show_plots_in_session <- TRUE
@@ -1164,21 +1165,446 @@ calculate_diversity_metrics <- function(detection_counts) {
   )
 }
 
-build_monthly_diversity_summary <- function(filtered_detections, timezone) {
+build_monthly_daylight_correction_summary <- function(filtered_detections,
+                                                      summary_metadata,
+                                                      light_phase_calendar,
+                                                      recording_phase_effort,
+                                                      timezone) {
+  empty_summary <- data.frame(
+    recorder_id = character(),
+    month_start = as.Date(character()),
+    month_label = character(),
+    available_daylight_twilight_hours = numeric(),
+    sampled_daylight_twilight_hours = numeric(),
+    daylight_twilight_detections = numeric(),
+    daylight_twilight_detection_rate = numeric(),
+    predicted_daylight_twilight_detection_rate = numeric(),
+    reference_daylight_twilight_hours = numeric(),
+    reference_daylight_twilight_detection_rate = numeric(),
+    daylight_twilight_correction_factor = numeric(),
+    selected_relationship_model = character(),
+    stringsAsFactors = FALSE
+  )
+  empty_points <- data.frame(
+    recorder_id = character(),
+    local_date = as.Date(character()),
+    month_start = as.Date(character()),
+    month_label = character(),
+    available_daylight_twilight_hours = numeric(),
+    sampled_daylight_twilight_hours = numeric(),
+    daylight_twilight_detections = numeric(),
+    daylight_twilight_detection_rate = numeric(),
+    predicted_linear_detection_rate = numeric(),
+    predicted_log_linear_detection_rate = numeric(),
+    predicted_daylight_twilight_detection_rate = numeric(),
+    selected_relationship_model = character(),
+    stringsAsFactors = FALSE
+  )
+  empty_curve <- data.frame(
+    model_type = character(),
+    available_daylight_twilight_hours = numeric(),
+    predicted_daylight_twilight_detection_rate = numeric(),
+    selected_model = logical(),
+    stringsAsFactors = FALSE
+  )
+  empty_model_comparison <- data.frame(
+    model_type = character(),
+    formula_label = character(),
+    aic = numeric(),
+    adjusted_r_squared = numeric(),
+    weighted_rmse = numeric(),
+    selected_model = logical(),
+    stringsAsFactors = FALSE
+  )
+
+  daily_dates <- unique(summary_metadata[, c("recorder_id", "local_date", "recording_latitude", "recording_longitude"), drop = FALSE])
+  daily_dates <- daily_dates[
+    !is.na(daily_dates$local_date) &
+      !is.na(daily_dates$recording_latitude) &
+      !is.na(daily_dates$recording_longitude),
+    ,
+    drop = FALSE
+  ]
+
+  if (nrow(daily_dates) == 0) {
+    return(list(
+      summary = empty_summary,
+      relationship_points = empty_points,
+      relationship_curve = empty_curve,
+      model = NULL,
+      models = list(),
+      selected_model_type = NA_character_,
+      model_comparison = empty_model_comparison
+    ))
+  }
+
+  month_start_from_date <- function(x) as.Date(strftime(x, "%Y-%m-01", tz = timezone))
+  day_key <- function(local_date, latitude, longitude) {
+    paste(local_date, signif(latitude, 8), signif(longitude, 8), sep = "|")
+  }
+  weighted_rmse <- function(actual, predicted, weights) {
+    sqrt(stats::weighted.mean((actual - predicted)^2, w = weights))
+  }
+
+  daily_dates$day_key <- day_key(daily_dates$local_date, daily_dates$recording_latitude, daily_dates$recording_longitude)
+  daily_dates$month_start <- month_start_from_date(daily_dates$local_date)
+
+  calendar_subset <- light_phase_calendar[, c("local_date", "latitude", "longitude", "daylight_hours", "twilight_hours"), drop = FALSE]
+  calendar_subset$day_key <- day_key(calendar_subset$local_date, calendar_subset$latitude, calendar_subset$longitude)
+  daily_dates <- merge(
+    daily_dates,
+    calendar_subset[, c("day_key", "daylight_hours", "twilight_hours"), drop = FALSE],
+    by = "day_key",
+    all.x = TRUE
+  )
+  daily_dates$daylight_hours[is.na(daily_dates$daylight_hours)] <- 0
+  daily_dates$twilight_hours[is.na(daily_dates$twilight_hours)] <- 0
+  daily_dates$available_daylight_twilight_hours <- daily_dates$daylight_hours + daily_dates$twilight_hours
+
+  daily_available <- aggregate(
+    list(available_daylight_twilight_hours = daily_dates$available_daylight_twilight_hours),
+    by = list(
+      recorder_id = daily_dates$recorder_id,
+      local_date = daily_dates$local_date,
+      month_start = daily_dates$month_start
+    ),
+    FUN = mean
+  )
+
+  effort_subset <- recording_phase_effort[
+    recording_phase_effort$light_phase %in% c("daylight", "twilight"),
+    ,
+    drop = FALSE
+  ]
+  effort_subset$month_start <- month_start_from_date(effort_subset$local_date)
+  daily_sampled <- if (nrow(effort_subset) > 0) {
+    aggregate(
+      list(sampled_daylight_twilight_hours = effort_subset$sampled_hours),
+      by = list(
+        recorder_id = effort_subset$recorder_id,
+        local_date = effort_subset$local_date,
+        month_start = effort_subset$month_start
+      ),
+      FUN = sum
+    )
+  } else {
+    data.frame(
+      recorder_id = character(),
+      local_date = as.Date(character()),
+      month_start = as.Date(character()),
+      sampled_daylight_twilight_hours = numeric(),
+      stringsAsFactors = FALSE
+    )
+  }
+
+  daylit_detections <- filtered_detections[
+    filtered_detections$light_phase %in% c("daylight", "twilight"),
+    ,
+    drop = FALSE
+  ]
+  daily_detections <- if (nrow(daylit_detections) > 0) {
+    aggregate(
+      list(daylight_twilight_detections = rep(1, nrow(daylit_detections))),
+      by = list(
+        recorder_id = daylit_detections$recorder_id,
+        local_date = daylit_detections$local_date,
+        month_start = daylit_detections$month_start
+      ),
+      FUN = sum
+    )
+  } else {
+    data.frame(
+      recorder_id = character(),
+      local_date = as.Date(character()),
+      month_start = as.Date(character()),
+      daylight_twilight_detections = numeric(),
+      stringsAsFactors = FALSE
+    )
+  }
+
+  relationship_points <- merge(
+    daily_available,
+    daily_sampled,
+    by = c("recorder_id", "local_date", "month_start"),
+    all = TRUE
+  )
+  relationship_points <- merge(
+    relationship_points,
+    daily_detections,
+    by = c("recorder_id", "local_date", "month_start"),
+    all = TRUE
+  )
+  relationship_points$available_daylight_twilight_hours[is.na(relationship_points$available_daylight_twilight_hours)] <- 0
+  relationship_points$sampled_daylight_twilight_hours[is.na(relationship_points$sampled_daylight_twilight_hours)] <- 0
+  relationship_points$daylight_twilight_detections[is.na(relationship_points$daylight_twilight_detections)] <- 0
+  relationship_points$month_label <- format(relationship_points$month_start, "%Y-%m")
+  relationship_points$daylight_twilight_detection_rate <- ifelse(
+    relationship_points$sampled_daylight_twilight_hours > 0,
+    relationship_points$daylight_twilight_detections / relationship_points$sampled_daylight_twilight_hours,
+    NA_real_
+  )
+
+  valid_rows <- relationship_points[
+    relationship_points$available_daylight_twilight_hours > 0 &
+      relationship_points$sampled_daylight_twilight_hours > 0,
+    ,
+    drop = FALSE
+  ]
+  valid_rows$log_available_hours <- log(valid_rows$available_daylight_twilight_hours)
+  models <- list()
+  model_comparison <- empty_model_comparison
+  selected_model_type <- NA_character_
+  model <- NULL
+  reference_hours <- if (nrow(valid_rows) > 0) stats::median(valid_rows$available_daylight_twilight_hours) else NA_real_
+
+  if (nrow(valid_rows) >= 3 &&
+      length(unique(signif(valid_rows$available_daylight_twilight_hours, 8))) > 1) {
+    models$linear <- stats::lm(
+      daylight_twilight_detection_rate ~ available_daylight_twilight_hours,
+      data = valid_rows,
+      weights = valid_rows$sampled_daylight_twilight_hours
+    )
+    models$log_linear <- stats::lm(
+      daylight_twilight_detection_rate ~ log_available_hours,
+      data = valid_rows,
+      weights = valid_rows$sampled_daylight_twilight_hours
+    )
+    model_comparison <- do.call(
+      rbind,
+      lapply(names(models), function(model_type) {
+        candidate_model <- models[[model_type]]
+        predicted_values <- as.numeric(stats::predict(candidate_model, newdata = valid_rows))
+        data.frame(
+          model_type = model_type,
+          formula_label = if (model_type == "linear") {
+            "rate ~ available_daylight_twilight_hours"
+          } else {
+            "rate ~ log(available_daylight_twilight_hours)"
+          },
+          aic = stats::AIC(candidate_model),
+          adjusted_r_squared = summary(candidate_model)$adj.r.squared,
+          weighted_rmse = weighted_rmse(
+            actual = valid_rows$daylight_twilight_detection_rate,
+            predicted = predicted_values,
+            weights = valid_rows$sampled_daylight_twilight_hours
+          ),
+          selected_model = FALSE,
+          stringsAsFactors = FALSE
+        )
+      })
+    )
+    selected_index <- order(model_comparison$aic, model_comparison$weighted_rmse)[[1]]
+    selected_model_type <- model_comparison$model_type[[selected_index]]
+    model_comparison$selected_model[model_comparison$model_type == selected_model_type] <- TRUE
+    model <- models[[selected_model_type]]
+  }
+
+  if (nrow(relationship_points) > 0) {
+    prediction_newdata <- data.frame(
+      available_daylight_twilight_hours = pmax(relationship_points$available_daylight_twilight_hours, 1e-6),
+      log_available_hours = log(pmax(relationship_points$available_daylight_twilight_hours, 1e-6))
+    )
+    relationship_points$predicted_linear_detection_rate <- if (!is.null(models$linear)) {
+      pmax(as.numeric(stats::predict(models$linear, newdata = prediction_newdata)), 1e-6)
+    } else {
+      NA_real_
+    }
+    relationship_points$predicted_log_linear_detection_rate <- if (!is.null(models$log_linear)) {
+      pmax(as.numeric(stats::predict(models$log_linear, newdata = prediction_newdata)), 1e-6)
+    } else {
+      NA_real_
+    }
+  } else {
+    relationship_points$predicted_linear_detection_rate <- numeric()
+    relationship_points$predicted_log_linear_detection_rate <- numeric()
+  }
+  relationship_points$selected_relationship_model <- if (is.na(selected_model_type)) "none" else selected_model_type
+
+  if (!is.null(model) && is.finite(reference_hours) && reference_hours > 0) {
+    selected_prediction_column <- if (selected_model_type == "log_linear") {
+      "predicted_log_linear_detection_rate"
+    } else {
+      "predicted_linear_detection_rate"
+    }
+    relationship_points$predicted_daylight_twilight_detection_rate <- relationship_points[[selected_prediction_column]]
+    reference_newdata <- data.frame(
+      available_daylight_twilight_hours = reference_hours,
+      log_available_hours = log(reference_hours)
+    )
+    reference_rate <- pmax(as.numeric(stats::predict(model, newdata = reference_newdata)), 1e-6)
+  } else {
+    relationship_points$predicted_daylight_twilight_detection_rate <- relationship_points$daylight_twilight_detection_rate
+    reference_rate <- NA_real_
+  }
+
+  monthly_available <- aggregate(
+    list(available_daylight_twilight_hours = relationship_points$available_daylight_twilight_hours),
+    by = list(recorder_id = relationship_points$recorder_id, month_start = relationship_points$month_start),
+    FUN = mean
+  )
+  monthly_sampled <- aggregate(
+    list(sampled_daylight_twilight_hours = relationship_points$sampled_daylight_twilight_hours),
+    by = list(recorder_id = relationship_points$recorder_id, month_start = relationship_points$month_start),
+    FUN = sum
+  )
+  monthly_detections <- aggregate(
+    list(daylight_twilight_detections = relationship_points$daylight_twilight_detections),
+    by = list(recorder_id = relationship_points$recorder_id, month_start = relationship_points$month_start),
+    FUN = sum
+  )
+  correction_summary <- merge(monthly_available, monthly_sampled, by = c("recorder_id", "month_start"), all = TRUE)
+  correction_summary <- merge(correction_summary, monthly_detections, by = c("recorder_id", "month_start"), all = TRUE)
+  correction_summary$available_daylight_twilight_hours[is.na(correction_summary$available_daylight_twilight_hours)] <- 0
+  correction_summary$sampled_daylight_twilight_hours[is.na(correction_summary$sampled_daylight_twilight_hours)] <- 0
+  correction_summary$daylight_twilight_detections[is.na(correction_summary$daylight_twilight_detections)] <- 0
+  correction_summary$month_label <- format(correction_summary$month_start, "%Y-%m")
+  correction_summary$daylight_twilight_detection_rate <- ifelse(
+    correction_summary$sampled_daylight_twilight_hours > 0,
+    correction_summary$daylight_twilight_detections / correction_summary$sampled_daylight_twilight_hours,
+    NA_real_
+  )
+  correction_summary$selected_relationship_model <- if (is.na(selected_model_type)) "none" else selected_model_type
+
+  if (!is.null(model) && is.finite(reference_hours) && reference_hours > 0) {
+    correction_newdata <- data.frame(
+      available_daylight_twilight_hours = pmax(correction_summary$available_daylight_twilight_hours, 1e-6),
+      log_available_hours = log(pmax(correction_summary$available_daylight_twilight_hours, 1e-6))
+    )
+    correction_summary$predicted_daylight_twilight_detection_rate <- pmax(
+      as.numeric(stats::predict(model, newdata = correction_newdata)),
+      1e-6
+    )
+    correction_summary$reference_daylight_twilight_hours <- reference_hours
+    correction_summary$reference_daylight_twilight_detection_rate <- reference_rate
+    correction_summary$daylight_twilight_correction_factor <- correction_summary$predicted_daylight_twilight_detection_rate / reference_rate
+  } else {
+    correction_summary$predicted_daylight_twilight_detection_rate <- correction_summary$daylight_twilight_detection_rate
+    correction_summary$reference_daylight_twilight_hours <- reference_hours
+    correction_summary$reference_daylight_twilight_detection_rate <- reference_rate
+    correction_summary$daylight_twilight_correction_factor <- 1
+  }
+
+  overall_available <- aggregate(
+    list(available_daylight_twilight_hours = relationship_points$available_daylight_twilight_hours),
+    by = list(month_start = relationship_points$month_start),
+    FUN = mean
+  )
+  overall_sampled <- aggregate(
+    list(sampled_daylight_twilight_hours = relationship_points$sampled_daylight_twilight_hours),
+    by = list(month_start = relationship_points$month_start),
+    FUN = sum
+  )
+  overall_detections <- aggregate(
+    list(daylight_twilight_detections = relationship_points$daylight_twilight_detections),
+    by = list(month_start = relationship_points$month_start),
+    FUN = sum
+  )
+  overall_summary <- merge(overall_available, overall_sampled, by = "month_start", all = TRUE)
+  overall_summary <- merge(overall_summary, overall_detections, by = "month_start", all = TRUE)
+  if (nrow(overall_summary) > 0) {
+    overall_summary$recorder_id <- "ALL_RECORDERS"
+    overall_summary$available_daylight_twilight_hours[is.na(overall_summary$available_daylight_twilight_hours)] <- 0
+    overall_summary$sampled_daylight_twilight_hours[is.na(overall_summary$sampled_daylight_twilight_hours)] <- 0
+    overall_summary$daylight_twilight_detections[is.na(overall_summary$daylight_twilight_detections)] <- 0
+    overall_summary$month_label <- format(overall_summary$month_start, "%Y-%m")
+    overall_summary$daylight_twilight_detection_rate <- ifelse(
+      overall_summary$sampled_daylight_twilight_hours > 0,
+      overall_summary$daylight_twilight_detections / overall_summary$sampled_daylight_twilight_hours,
+      NA_real_
+    )
+    overall_summary$selected_relationship_model <- if (is.na(selected_model_type)) "none" else selected_model_type
+    if (!is.null(model) && is.finite(reference_hours) && reference_hours > 0) {
+      overall_newdata <- data.frame(
+        available_daylight_twilight_hours = pmax(overall_summary$available_daylight_twilight_hours, 1e-6),
+        log_available_hours = log(pmax(overall_summary$available_daylight_twilight_hours, 1e-6))
+      )
+      overall_summary$predicted_daylight_twilight_detection_rate <- pmax(
+        as.numeric(stats::predict(model, newdata = overall_newdata)),
+        1e-6
+      )
+      overall_summary$reference_daylight_twilight_hours <- reference_hours
+      overall_summary$reference_daylight_twilight_detection_rate <- reference_rate
+      overall_summary$daylight_twilight_correction_factor <- overall_summary$predicted_daylight_twilight_detection_rate / reference_rate
+    } else {
+      overall_summary$predicted_daylight_twilight_detection_rate <- overall_summary$daylight_twilight_detection_rate
+      overall_summary$reference_daylight_twilight_hours <- reference_hours
+      overall_summary$reference_daylight_twilight_detection_rate <- reference_rate
+      overall_summary$daylight_twilight_correction_factor <- 1
+    }
+    overall_summary <- overall_summary[, names(correction_summary), drop = FALSE]
+    correction_summary <- rbind(correction_summary, overall_summary)
+  }
+
+  relationship_curve <- if (length(models) > 0 && nrow(valid_rows) > 0) {
+    curve_hours <- seq(min(valid_rows$available_daylight_twilight_hours), max(valid_rows$available_daylight_twilight_hours), length.out = 200)
+    curve_newdata <- data.frame(
+      available_daylight_twilight_hours = curve_hours,
+      log_available_hours = log(curve_hours)
+    )
+    do.call(
+      rbind,
+      lapply(names(models), function(model_type) {
+        data.frame(
+          model_type = model_type,
+          available_daylight_twilight_hours = curve_hours,
+          predicted_daylight_twilight_detection_rate = pmax(
+            as.numeric(stats::predict(models[[model_type]], newdata = curve_newdata)),
+            1e-6
+          ),
+          selected_model = model_type == selected_model_type,
+          stringsAsFactors = FALSE
+        )
+      })
+    )
+  } else {
+    empty_curve
+  }
+
+  relationship_points <- relationship_points[
+    order(relationship_points$recorder_id, relationship_points$local_date),
+    ,
+    drop = FALSE
+  ]
+  correction_summary <- correction_summary[
+    order(correction_summary$recorder_id, correction_summary$month_start),
+    ,
+    drop = FALSE
+  ]
+
+  list(
+    summary = correction_summary,
+    relationship_points = relationship_points,
+    relationship_curve = relationship_curve,
+    model = model,
+    models = models,
+    selected_model_type = selected_model_type,
+    model_comparison = model_comparison
+  )
+}
+
+build_monthly_diversity_summary <- function(filtered_detections, timezone, diversity_window_days) {
   grouped_detections <- split(
     filtered_detections,
-    interaction(filtered_detections$recorder_id, filtered_detections$month_start, drop = TRUE)
+    interaction(filtered_detections$recorder_id, filtered_detections$diversity_window_start, drop = TRUE)
   )
 
   monthly_diversity_list <- lapply(grouped_detections, function(group_df) {
-    detection_counts <- as.numeric(table(group_df$scientific_name))
-    diversity_metrics <- calculate_diversity_metrics(detection_counts)
+    raw_total_detections <- nrow(group_df)
+    species_counts <- aggregate(
+      list(detection_count = rep(1, nrow(group_df))),
+      by = list(scientific_name = group_df$scientific_name),
+      FUN = sum
+    )
+    diversity_metrics <- calculate_diversity_metrics(species_counts$detection_count)
+    names(diversity_metrics)[names(diversity_metrics) == "total_detections"] <- "window_total_detections"
 
     data.frame(
       recorder_id = group_df$recorder_id[[1]],
-      month_start = as.Date(group_df$month_start[[1]]),
-      month_label = format(as.Date(group_df$month_start[[1]]), "%Y-%m"),
-      month_of_year = format(as.Date(group_df$month_start[[1]]), "%b"),
+      diversity_window_start = as.Date(group_df$diversity_window_start[[1]]),
+      diversity_window_end = as.Date(group_df$diversity_window_end[[1]]),
+      diversity_window_label = as.character(group_df$diversity_window_label[[1]]),
+      diversity_window_days = diversity_window_days,
+      raw_total_detections = raw_total_detections,
       diversity_metrics,
       stringsAsFactors = FALSE
     )
@@ -1186,11 +1612,112 @@ build_monthly_diversity_summary <- function(filtered_detections, timezone) {
 
   monthly_diversity_summary <- do.call(rbind, monthly_diversity_list)
   monthly_diversity_summary <- monthly_diversity_summary[
-    order(monthly_diversity_summary$recorder_id, monthly_diversity_summary$month_start),
+    order(monthly_diversity_summary$recorder_id, monthly_diversity_summary$diversity_window_start),
     ,
     drop = FALSE
   ]
-  monthly_diversity_summary$month_start <- as.Date(monthly_diversity_summary$month_start)
+  monthly_diversity_summary$diversity_window_start <- as.Date(monthly_diversity_summary$diversity_window_start)
+  monthly_diversity_summary$diversity_window_end <- as.Date(monthly_diversity_summary$diversity_window_end)
+  monthly_diversity_summary
+}
+
+build_monthly_daily_incidence_diversity_summary <- function(filtered_detections, timezone, diversity_window_days) {
+  if (nrow(filtered_detections) == 0) {
+    return(data.frame(
+      recorder_id = character(),
+      diversity_window_start = as.Date(character()),
+      diversity_window_end = as.Date(character()),
+      diversity_window_label = character(),
+      diversity_window_days = numeric(),
+      sampled_days = numeric(),
+      raw_total_detections = numeric(),
+      total_incidence_weight = numeric(),
+      species_richness = numeric(),
+      shannon_index = numeric(),
+      simpson_index = numeric(),
+      hill_q1 = numeric(),
+      hill_q2 = numeric(),
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  sampled_days_df <- unique(
+    filtered_detections[, c("recorder_id", "local_date", "diversity_window_start", "diversity_window_end", "diversity_window_label"), drop = FALSE]
+  )
+  sampled_days_summary <- aggregate(
+    list(sampled_days = rep(1, nrow(sampled_days_df))),
+    by = list(
+      recorder_id = sampled_days_df$recorder_id,
+      diversity_window_start = sampled_days_df$diversity_window_start,
+      diversity_window_end = sampled_days_df$diversity_window_end,
+      diversity_window_label = sampled_days_df$diversity_window_label
+    ),
+    FUN = sum
+  )
+
+  total_detections_summary <- aggregate(
+    list(raw_total_detections = rep(1, nrow(filtered_detections))),
+    by = list(recorder_id = filtered_detections$recorder_id, diversity_window_start = filtered_detections$diversity_window_start),
+    FUN = sum
+  )
+
+  species_day_presence <- unique(filtered_detections[, c("recorder_id", "diversity_window_start", "local_date", "scientific_name"), drop = FALSE])
+  species_day_counts <- aggregate(
+    list(days_detected = rep(1, nrow(species_day_presence))),
+    by = list(
+      recorder_id = species_day_presence$recorder_id,
+      diversity_window_start = species_day_presence$diversity_window_start,
+      scientific_name = species_day_presence$scientific_name
+    ),
+    FUN = sum
+  )
+  species_day_counts <- merge(
+    species_day_counts,
+    sampled_days_summary,
+    by = c("recorder_id", "diversity_window_start"),
+    all.x = TRUE
+  )
+  species_day_counts$incidence_weight <- with(
+    species_day_counts,
+    ifelse(sampled_days > 0, days_detected / sampled_days, 0)
+  )
+
+  grouped_incidence <- split(
+    species_day_counts,
+    interaction(species_day_counts$recorder_id, species_day_counts$diversity_window_start, drop = TRUE)
+  )
+  monthly_diversity_list <- lapply(grouped_incidence, function(group_df) {
+    incidence_metrics <- calculate_diversity_metrics(group_df$incidence_weight)
+    names(incidence_metrics)[names(incidence_metrics) == "total_detections"] <- "total_incidence_weight"
+    sampled_days <- unique(group_df$sampled_days)
+    raw_match <- total_detections_summary[
+      total_detections_summary$recorder_id == group_df$recorder_id[[1]] &
+        total_detections_summary$diversity_window_start == as.Date(group_df$diversity_window_start[[1]]),
+      ,
+      drop = FALSE
+    ]
+
+    data.frame(
+      recorder_id = group_df$recorder_id[[1]],
+      diversity_window_start = as.Date(group_df$diversity_window_start[[1]]),
+      diversity_window_end = as.Date(group_df$diversity_window_end[[1]]),
+      diversity_window_label = as.character(group_df$diversity_window_label[[1]]),
+      diversity_window_days = diversity_window_days,
+      sampled_days = if (length(sampled_days) > 0) sampled_days[[1]] else NA_real_,
+      raw_total_detections = if (nrow(raw_match) > 0) raw_match$raw_total_detections[[1]] else NA_real_,
+      incidence_metrics,
+      stringsAsFactors = FALSE
+    )
+  })
+
+  monthly_diversity_summary <- do.call(rbind, monthly_diversity_list)
+  monthly_diversity_summary <- monthly_diversity_summary[
+    order(monthly_diversity_summary$recorder_id, monthly_diversity_summary$diversity_window_start),
+    ,
+    drop = FALSE
+  ]
+  monthly_diversity_summary$diversity_window_start <- as.Date(monthly_diversity_summary$diversity_window_start)
+  monthly_diversity_summary$diversity_window_end <- as.Date(monthly_diversity_summary$diversity_window_end)
   monthly_diversity_summary
 }
 
@@ -1200,32 +1727,32 @@ build_monthly_diversity_long <- function(monthly_diversity_summary) {
     list(
       data.frame(
         recorder_id = monthly_diversity_summary$recorder_id,
-        month_start = monthly_diversity_summary$month_start,
-        month_label = monthly_diversity_summary$month_label,
+        diversity_window_start = monthly_diversity_summary$diversity_window_start,
+        diversity_window_label = monthly_diversity_summary$diversity_window_label,
         metric_name = "Hill number (q = 1)",
         metric_value = monthly_diversity_summary$hill_q1,
         stringsAsFactors = FALSE
       ),
       data.frame(
         recorder_id = monthly_diversity_summary$recorder_id,
-        month_start = monthly_diversity_summary$month_start,
-        month_label = monthly_diversity_summary$month_label,
+        diversity_window_start = monthly_diversity_summary$diversity_window_start,
+        diversity_window_label = monthly_diversity_summary$diversity_window_label,
         metric_name = "Hill number (q = 2)",
         metric_value = monthly_diversity_summary$hill_q2,
         stringsAsFactors = FALSE
       ),
       data.frame(
         recorder_id = monthly_diversity_summary$recorder_id,
-        month_start = monthly_diversity_summary$month_start,
-        month_label = monthly_diversity_summary$month_label,
+        diversity_window_start = monthly_diversity_summary$diversity_window_start,
+        diversity_window_label = monthly_diversity_summary$diversity_window_label,
         metric_name = "Shannon index",
         metric_value = monthly_diversity_summary$shannon_index,
         stringsAsFactors = FALSE
       ),
       data.frame(
         recorder_id = monthly_diversity_summary$recorder_id,
-        month_start = monthly_diversity_summary$month_start,
-        month_label = monthly_diversity_summary$month_label,
+        diversity_window_start = monthly_diversity_summary$diversity_window_start,
+        diversity_window_label = monthly_diversity_summary$diversity_window_label,
         metric_name = "Simpson index",
         metric_value = monthly_diversity_summary$simpson_index,
         stringsAsFactors = FALSE
@@ -2044,6 +2571,11 @@ if (!is.numeric(periodicity_max_lag_bins) || length(periodicity_max_lag_bins) !=
   stop("periodicity_max_lag_bins must be a single integer greater than or equal to 1")
 }
 
+if (!is.numeric(diversity_window_days) || length(diversity_window_days) != 1 ||
+    is.na(diversity_window_days) || diversity_window_days < 1) {
+  stop("diversity_window_days must be a single integer greater than or equal to 1")
+}
+
 if (!is.logical(show_plots_in_session) || length(show_plots_in_session) != 1 || is.na(show_plots_in_session)) {
   stop("show_plots_in_session must be TRUE or FALSE")
 }
@@ -2053,6 +2585,7 @@ top_species_time_bin_minutes <- as.numeric(top_species_time_bin_minutes)
 rolling_mean_window_days <- as.numeric(rolling_mean_window_days)
 min_confidence <- as.numeric(min_confidence)
 periodicity_max_lag_bins <- as.integer(periodicity_max_lag_bins)
+diversity_window_days <- as.integer(round(diversity_window_days))
 
 analysis_name <- sprintf(
   "confidence_%s_bin_%smin",
@@ -2150,6 +2683,15 @@ filtered_detections$month_num <- as.integer(format(filtered_detections$date_time
 filtered_detections$month_label <- factor(month.abb[filtered_detections$month_num], levels = month.abb)
 filtered_detections$month_start <- as.Date(strftime(filtered_detections$date_time, "%Y-%m-01", tz = analysis_timezone))
 filtered_detections$local_date <- as.Date(strftime(filtered_detections$date_time, "%Y-%m-%d", tz = analysis_timezone))
+diversity_anchor_date <- min(filtered_detections$local_date, na.rm = TRUE)
+diversity_window_offsets <- as.integer(difftime(filtered_detections$local_date, diversity_anchor_date, units = "days"))
+filtered_detections$diversity_window_start <- diversity_anchor_date + (diversity_window_offsets %/% diversity_window_days) * diversity_window_days
+filtered_detections$diversity_window_end <- filtered_detections$diversity_window_start + diversity_window_days - 1L
+filtered_detections$diversity_window_label <- sprintf(
+  "%s to %s",
+  format(filtered_detections$diversity_window_start, "%Y-%m-%d"),
+  format(filtered_detections$diversity_window_end, "%Y-%m-%d")
+)
 filtered_detections$local_hour <- as.numeric(strftime(filtered_detections$date_time, "%H", tz = analysis_timezone)) +
   as.numeric(strftime(filtered_detections$date_time, "%M", tz = analysis_timezone)) / 60 +
   as.numeric(strftime(filtered_detections$date_time, "%S", tz = analysis_timezone)) / 3600
@@ -2374,13 +2916,6 @@ species_counts_by_month_positive <- species_counts_by_month[
   drop = FALSE
 ]
 
-monthly_diversity_summary <- build_monthly_diversity_summary(filtered_detections, analysis_timezone)
-monthly_diversity_long <- build_monthly_diversity_long(monthly_diversity_summary)
-monthly_diversity_long$metric_name <- factor(
-  monthly_diversity_long$metric_name,
-  levels = c("Hill number (q = 1)", "Hill number (q = 2)", "Shannon index", "Simpson index")
-)
-
 top_species_time_series <- build_top_species_time_series(
   filtered_detections,
   bin_minutes = top_species_time_bin_minutes,
@@ -2394,16 +2929,6 @@ top_species_time_series_positive <- top_species_time_series[
 ]
 top_species_label_parser <- build_species_label_parser(species_label_plotmath_lookup)
 top_species_style <- top_species_style_values(levels(top_species_time_series$species_label))
-
-overall_monthly_diversity_summary <- build_monthly_diversity_summary(
-  transform(filtered_detections, recorder_id = "ALL_RECORDERS"),
-  analysis_timezone
-)
-overall_monthly_diversity_long <- build_monthly_diversity_long(overall_monthly_diversity_summary)
-overall_monthly_diversity_long$metric_name <- factor(
-  overall_monthly_diversity_long$metric_name,
-  levels = levels(monthly_diversity_long$metric_name)
-)
 
 recorder_ids <- sort(unique(filtered_detections$recorder_id))
 recorder_output_root <- file.path(output_dir, "recorders")
@@ -2677,6 +3202,58 @@ if (nrow(recording_phase_effort) > 0) {
   )
 }
 
+monthly_diversity_summary <- build_monthly_diversity_summary(
+  filtered_detections,
+  analysis_timezone,
+  diversity_window_days = diversity_window_days
+)
+monthly_diversity_long <- build_monthly_diversity_long(monthly_diversity_summary)
+monthly_diversity_long$metric_name <- factor(
+  monthly_diversity_long$metric_name,
+  levels = c("Hill number (q = 1)", "Hill number (q = 2)", "Shannon index", "Simpson index")
+)
+monthly_diversity_daily_incidence_summary <- build_monthly_daily_incidence_diversity_summary(
+  filtered_detections,
+  analysis_timezone,
+  diversity_window_days = diversity_window_days
+)
+monthly_diversity_daily_incidence_long <- build_monthly_diversity_long(monthly_diversity_daily_incidence_summary)
+monthly_diversity_daily_incidence_long$metric_name <- factor(
+  monthly_diversity_daily_incidence_long$metric_name,
+  levels = levels(monthly_diversity_long$metric_name)
+)
+overall_monthly_diversity_summary <- build_monthly_diversity_summary(
+  transform(filtered_detections, recorder_id = "ALL_RECORDERS"),
+  analysis_timezone,
+  diversity_window_days = diversity_window_days
+)
+overall_monthly_diversity_long <- build_monthly_diversity_long(overall_monthly_diversity_summary)
+overall_monthly_diversity_long$metric_name <- factor(
+  overall_monthly_diversity_long$metric_name,
+  levels = levels(monthly_diversity_long$metric_name)
+)
+overall_monthly_diversity_daily_incidence_summary <- build_monthly_daily_incidence_diversity_summary(
+  transform(filtered_detections, recorder_id = "ALL_RECORDERS"),
+  analysis_timezone,
+  diversity_window_days = diversity_window_days
+)
+overall_monthly_diversity_daily_incidence_long <- build_monthly_diversity_long(overall_monthly_diversity_daily_incidence_summary)
+overall_monthly_diversity_daily_incidence_long$metric_name <- factor(
+  overall_monthly_diversity_daily_incidence_long$metric_name,
+  levels = levels(monthly_diversity_long$metric_name)
+)
+monthly_raw_species_richness <- aggregate(
+  list(raw_species_richness = filtered_detections$scientific_name),
+  by = list(month_start = filtered_detections$month_start),
+  FUN = function(x) length(unique(x))
+)
+monthly_raw_species_richness$month_label <- format(monthly_raw_species_richness$month_start, "%Y-%m")
+monthly_raw_species_richness <- monthly_raw_species_richness[
+  order(monthly_raw_species_richness$month_start),
+  ,
+  drop = FALSE
+]
+
 diel_detections <- filtered_detections[!is.na(filtered_detections$light_phase), , drop = FALSE]
 diel_species_summary <- build_diel_species_summary(
   detections_subset = diel_detections,
@@ -2699,6 +3276,7 @@ light_phase_sampling_effort_csv <- file.path(output_dir, "birdnet_light_phase_sa
 light_phase_sampling_effort_by_recorder_csv <- file.path(output_dir, "birdnet_light_phase_sampling_effort_by_recorder.csv")
 diel_species_csv <- file.path(output_dir, "birdnet_diel_activity_by_species.csv")
 diel_species_by_recorder_csv <- file.path(output_dir, "birdnet_diel_activity_by_species_by_recorder.csv")
+monthly_raw_species_richness_csv <- file.path(output_dir, "birdnet_raw_species_richness_by_month.csv")
 time_series_csv <- file.path(output_dir, "birdnet_identifications_by_time_bin.csv")
 time_series_by_recorder_csv <- file.path(output_dir, "birdnet_identifications_by_time_bin_by_recorder.csv")
 top_species_time_series_csv <- file.path(output_dir, "birdnet_top_10_species_detections_through_time.csv")
@@ -2711,6 +3289,8 @@ species_counts_by_month_csv <- file.path(output_dir, "birdnet_identifications_by
 species_counts_by_month_by_recorder_csv <- file.path(output_dir, "birdnet_identifications_by_species_by_month_by_recorder.csv")
 monthly_diversity_csv <- file.path(output_dir, "birdnet_monthly_diversity_metrics.csv")
 overall_monthly_diversity_csv <- file.path(output_dir, "birdnet_monthly_diversity_metrics_overall.csv")
+monthly_diversity_daily_incidence_csv <- file.path(output_dir, "birdnet_monthly_diversity_metrics_daily_incidence.csv")
+overall_monthly_diversity_daily_incidence_csv <- file.path(output_dir, "birdnet_monthly_diversity_metrics_daily_incidence_overall.csv")
 acf_csv <- file.path(output_dir, "birdnet_identification_acf.csv")
 spectrum_csv <- file.path(output_dir, "birdnet_identification_spectrum.csv")
 temporal_diagnostics_csv <- file.path(output_dir, "birdnet_temporal_diagnostics.csv")
@@ -2729,6 +3309,7 @@ write.csv(light_phase_sampling_effort, light_phase_sampling_effort_csv, row.name
 write.csv(light_phase_sampling_effort_by_recorder, light_phase_sampling_effort_by_recorder_csv, row.names = FALSE)
 write.csv(diel_species_summary, diel_species_csv, row.names = FALSE)
 write.csv(diel_species_summary_by_recorder, diel_species_by_recorder_csv, row.names = FALSE)
+write.csv(monthly_raw_species_richness, monthly_raw_species_richness_csv, row.names = FALSE)
 write.csv(time_series_summary, time_series_csv, row.names = FALSE)
 write.csv(time_series_by_recorder, time_series_by_recorder_csv, row.names = FALSE)
 write.csv(top_species_time_series, top_species_time_series_csv, row.names = FALSE)
@@ -2741,6 +3322,8 @@ write.csv(species_counts_by_month, species_counts_by_month_csv, row.names = FALS
 write.csv(species_counts_by_month_by_recorder, species_counts_by_month_by_recorder_csv, row.names = FALSE)
 write.csv(monthly_diversity_summary, monthly_diversity_csv, row.names = FALSE)
 write.csv(overall_monthly_diversity_summary, overall_monthly_diversity_csv, row.names = FALSE)
+write.csv(monthly_diversity_daily_incidence_summary, monthly_diversity_daily_incidence_csv, row.names = FALSE)
+write.csv(overall_monthly_diversity_daily_incidence_summary, overall_monthly_diversity_daily_incidence_csv, row.names = FALSE)
 write.csv(acf_table, acf_csv, row.names = FALSE)
 write.csv(spectrum_table, spectrum_csv, row.names = FALSE)
 write.csv(temporal_diagnostics, temporal_diagnostics_csv, row.names = FALSE)
@@ -2897,16 +3480,47 @@ species_counts_by_month_plot <- ggplot2::ggplot(
 
 monthly_diversity_plot <- ggplot2::ggplot(
   overall_monthly_diversity_long,
-  ggplot2::aes(x = month_start, y = metric_value, group = recorder_id)
+  ggplot2::aes(x = diversity_window_start, y = metric_value, group = recorder_id)
 ) +
   ggplot2::geom_line(linewidth = 0.9, colour = "steelblue4") +
   ggplot2::geom_point(size = 2) +
   ggplot2::facet_wrap(~metric_name, scales = "free_y", ncol = 2) +
   ggplot2::labs(
-    title = "monthly diversity metrics across all recorders",
-    subtitle = "detections treated as relative abundance for Shannon, Simpson, and Hill numbers",
-    x = "month",
+    title = "diversity metrics across all recorders",
+    subtitle = sprintf("detections-as-abundance summary using %s-day analysis windows", diversity_window_days),
+    x = "diversity window start",
     y = "metric value"
+  ) +
+  ggplot2::scale_x_date(date_labels = "%Y-%m") +
+  analysis_plot_theme()
+
+monthly_diversity_daily_incidence_plot <- ggplot2::ggplot(
+  overall_monthly_diversity_daily_incidence_long,
+  ggplot2::aes(x = diversity_window_start, y = metric_value, group = recorder_id)
+) +
+  ggplot2::geom_line(linewidth = 0.9, colour = "darkolivegreen4") +
+  ggplot2::geom_point(size = 2, colour = "darkolivegreen4") +
+  ggplot2::facet_wrap(~metric_name, scales = "free_y", ncol = 2) +
+  ggplot2::labs(
+    title = "diversity metrics across all recorders",
+    subtitle = sprintf("daily-incidence diversity using %s-day analysis windows", diversity_window_days),
+    x = "diversity window start",
+    y = "metric value"
+  ) +
+  ggplot2::scale_x_date(date_labels = "%Y-%m") +
+  analysis_plot_theme()
+
+monthly_raw_species_richness_plot <- ggplot2::ggplot(
+  monthly_raw_species_richness,
+  ggplot2::aes(x = month_start, y = raw_species_richness)
+) +
+  ggplot2::geom_line(linewidth = 0.9, colour = "darkgreen") +
+  ggplot2::geom_point(size = 2, colour = "darkgreen") +
+  ggplot2::labs(
+    title = "raw species richness by month",
+    subtitle = sprintf("unique species detected per calendar month | minimum confidence: %.3f", min_confidence),
+    x = "month",
+    y = "species richness"
   ) +
   ggplot2::scale_x_date(date_labels = "%Y-%m") +
   analysis_plot_theme()
@@ -3053,7 +3667,7 @@ species_counts_by_month_by_recorder_plot <- ggplot2::ggplot(
 
 monthly_diversity_by_recorder_plot <- ggplot2::ggplot(
   monthly_diversity_long,
-  ggplot2::aes(x = month_start, y = metric_value, group = 1)
+  ggplot2::aes(x = diversity_window_start, y = metric_value, group = 1)
 ) +
   ggplot2::geom_line(linewidth = 0.9, colour = "steelblue4") +
   ggplot2::geom_point(size = 1.8, colour = "steelblue4") +
@@ -3063,9 +3677,29 @@ monthly_diversity_by_recorder_plot <- ggplot2::ggplot(
     ncol = 2
   ) +
   ggplot2::labs(
-    title = "monthly diversity metrics by recorder",
-    subtitle = "detections treated as relative abundance for Shannon, Simpson, and Hill numbers",
-    x = "month",
+    title = "diversity metrics by recorder",
+    subtitle = sprintf("detections-as-abundance summary using %s-day analysis windows", diversity_window_days),
+    x = "diversity window start",
+    y = "metric value"
+  ) +
+  ggplot2::scale_x_date(date_labels = "%Y-%m") +
+  analysis_plot_theme()
+
+monthly_diversity_daily_incidence_by_recorder_plot <- ggplot2::ggplot(
+  monthly_diversity_daily_incidence_long,
+  ggplot2::aes(x = diversity_window_start, y = metric_value, group = 1)
+) +
+  ggplot2::geom_line(linewidth = 0.9, colour = "darkolivegreen4") +
+  ggplot2::geom_point(size = 1.8, colour = "darkolivegreen4") +
+  ggplot2::facet_wrap(
+    ~paste(recorder_id, metric_name, sep = "\n"),
+    scales = "free_y",
+    ncol = 2
+  ) +
+  ggplot2::labs(
+    title = "diversity metrics by recorder",
+    subtitle = sprintf("daily-incidence diversity using %s-day analysis windows", diversity_window_days),
+    x = "diversity window start",
     y = "metric value"
   ) +
   ggplot2::scale_x_date(date_labels = "%Y-%m") +
@@ -3257,6 +3891,8 @@ if (isTRUE(show_plots_in_session) && interactive()) {
   print(species_counts_plot)
   print(species_counts_by_month_plot)
   print(monthly_diversity_plot)
+  print(monthly_diversity_daily_incidence_plot)
+  print(monthly_raw_species_richness_plot)
   print(top_species_plot)
   print(diel_activity_heatmap_plot)
   print(diel_preference_plot)
@@ -3267,6 +3903,7 @@ if (isTRUE(show_plots_in_session) && interactive()) {
   print(species_counts_by_recorder_plot)
   print(species_counts_by_month_by_recorder_plot)
   print(monthly_diversity_by_recorder_plot)
+  print(monthly_diversity_daily_incidence_by_recorder_plot)
   print(periodicity_plot)
   print(periodicity_by_recorder_plot)
 }
@@ -3311,6 +3948,20 @@ ggplot2::ggsave(
   plot = monthly_diversity_plot,
   width = 14,
   height = 10,
+  dpi = 150
+)
+ggplot2::ggsave(
+  filename = file.path(output_dir, "birdnet_monthly_diversity_metrics_daily_incidence.png"),
+  plot = monthly_diversity_daily_incidence_plot,
+  width = 14,
+  height = 10,
+  dpi = 150
+)
+ggplot2::ggsave(
+  filename = file.path(output_dir, "birdnet_raw_species_richness_by_month.png"),
+  plot = monthly_raw_species_richness_plot,
+  width = 12,
+  height = 7,
   dpi = 150
 )
 ggplot2::ggsave(
@@ -3573,15 +4224,15 @@ for (recorder_id in recorder_ids) {
 
   recorder_diversity_plot <- ggplot2::ggplot(
     recorder_diversity_long,
-    ggplot2::aes(x = month_start, y = metric_value, group = 1)
+    ggplot2::aes(x = diversity_window_start, y = metric_value, group = 1)
   ) +
     ggplot2::geom_line(linewidth = 0.9, colour = "steelblue4") +
     ggplot2::geom_point(size = 2, colour = "steelblue4") +
     ggplot2::facet_wrap(~metric_name, scales = "free_y", ncol = 2) +
     ggplot2::labs(
-      title = sprintf("monthly diversity metrics: %s", recorder_id),
-      subtitle = "detections treated as relative abundance for Shannon, Simpson, and Hill numbers",
-      x = "month",
+      title = sprintf("diversity metrics: %s", recorder_id),
+      subtitle = sprintf("detections-as-abundance summary using %s-day analysis windows", diversity_window_days),
+      x = "diversity window start",
       y = "metric value"
     ) +
     ggplot2::scale_x_date(date_labels = "%Y-%m") +
@@ -3644,6 +4295,7 @@ for (recorder_id in recorder_ids) {
   ggplot2::ggsave(file.path(recorder_dir, "birdnet_identifications_by_species.png"), recorder_species_plot, width = 13, height = 10, dpi = 150)
   ggplot2::ggsave(file.path(recorder_dir, "birdnet_identifications_by_species_by_month.png"), recorder_species_by_month_plot, width = 16, height = 12, dpi = 150)
   ggplot2::ggsave(file.path(recorder_dir, "birdnet_monthly_diversity_metrics.png"), recorder_diversity_plot, width = 14, height = 10, dpi = 150)
+  ggplot2::ggsave(file.path(recorder_dir, "birdnet_monthly_diversity_metrics_daily_incidence.png"), monthly_diversity_daily_incidence_by_recorder_plot, width = 14, height = 10, dpi = 150)
   ggplot2::ggsave(file.path(recorder_dir, "birdnet_top_10_species_detections_through_time.png"), recorder_top_species_plot, width = 14, height = 8, dpi = 150)
   ggplot2::ggsave(file.path(recorder_dir, "birdnet_periodicity.png"), recorder_periodicity_plot, width = 15, height = 11, dpi = 150)
 }

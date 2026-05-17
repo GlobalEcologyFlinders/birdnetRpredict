@@ -19,16 +19,17 @@ get_script_dir <- function() {
   normalizePath(".")
 }
 
-if (!exists("script_dir", inherits = FALSE)) {
-  script_dir <- get_script_dir()
+script_dir <- get_script_dir()
+source(file.path(script_dir, "downloading_user_options.R"), local = globalenv())
+
+if (!source_mode %in% c("archive", "ecosounds")) {
+  stop("source_mode in downloading_user_options.R must be either 'archive' or 'ecosounds'.")
 }
 
-if (!exists("source_mode", inherits = TRUE)) {
-  source(file.path(script_dir, "downloading_user_options.R"), local = globalenv())
+entrypoint_path <- if (identical(source_mode, "archive")) {
+  file.path(script_dir, "process_tar_archive.R")
+} else {
+  file.path(script_dir, "process_ecosounds.R")
 }
 
-if (!identical(source_mode, "archive")) {
-  stop("process_tar_archive.R requires source_mode <- 'archive' in downloading_user_options.R.")
-}
-
-source(file.path(script_dir, "process_download_common.R"), local = globalenv())
+source(entrypoint_path, local = globalenv())

@@ -27,8 +27,8 @@ if (!exists("source_mode", inherits = TRUE)) {
   source(file.path(script_dir, "downloading_user_options.R"), local = globalenv())
 }
 
-if (!identical(source_mode, "archive")) {
-  stop("process_tar_archive.R requires source_mode <- 'archive' in downloading_user_options.R.")
+if (!identical(source_mode, "ecosounds")) {
+  stop("process_ecosounds.R requires source_mode <- 'ecosounds' in downloading_user_options.R.")
 }
 
 source(file.path(script_dir, "process_download_common.R"), local = globalenv())
